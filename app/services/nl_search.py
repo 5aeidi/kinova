@@ -135,18 +135,109 @@ class ParsedIntent(BaseModel):
         return value
 
 
-class NaturalLanguageResult(BaseModel):
-    """Unified response for a natural-language search."""
+class StructuredSearchQuery(BaseModel):
+    """Deterministic, UI-friendly search filters for the filter panel."""
 
     model_config = ConfigDict(populate_by_name=True)
 
-    prompt: str
+    intent: str = Field(
+        default="movies",
+        description="One of: movies, shows, cinemas",
+    )
+    search_query: str | None = Field(
+        default=None,
+        alias="searchQuery",
+        description="Free-text movie/cinema title search",
+    )
+    genres: list[str] = Field(default_factory=list, description="Genre names")
+    date: str | None = Field(
+        default=None,
+        description="Target date as YYYY-MM-DD or relative term today/tomorrow",
+    )
+    location: str | None = Field(default=None, description="City or location name")
+    cinema_id: str | None = Field(
+        default=None,
+        alias="cinemaId",
+        description="Kinoheld cinema ID",
+    )
+    flags: list[str] = Field(
+        default_factory=list,
+        description="Show flags to look for, e.g. ['OmU','OV','3D']",
+    )
+    language: str | None = Field(
+        default=None,
+        description="Language hint for soft movie filtering",
+    )
+    duration_min: int | None = Field(
+        default=None,
+        alias="durationMin",
+        ge=0,
+        description="Minimum movie duration in minutes",
+    )
+    duration_max: int | None = Field(
+        default=None,
+        alias="durationMax",
+        ge=0,
+        description="Maximum movie duration in minutes",
+    )
+    year: int | None = Field(default=None, description="Exact production year")
+    year_min: int | None = Field(
+        default=None,
+        alias="yearMin",
+        description="Minimum production year",
+    )
+    year_max: int | None = Field(
+        default=None,
+        alias="yearMax",
+        description="Maximum production year",
+    )
+    rating_min: float | None = Field(
+        default=None,
+        alias="ratingMin",
+        ge=0,
+        le=10,
+        description="Minimum IMDb rating",
+    )
+    rating_max: float | None = Field(
+        default=None,
+        alias="ratingMax",
+        ge=0,
+        le=10,
+        description="Maximum IMDb rating",
+    )
+    actors: list[str] = Field(default_factory=list, description="Actor names")
+    directors: list[str] = Field(default_factory=list, description="Director names")
+    cast: list[str] = Field(
+        default_factory=list,
+        description="Any cast/creator names when role is unclear",
+    )
+    use_cache: bool = Field(
+        default=False,
+        alias="useCache",
+        description="Use cached data instead of live Kinoheld requests",
+    )
+    limit: int = Field(default=20, ge=1, le=100)
+
+    _normalise_date = field_validator("date")(ParsedIntent._normalise_relative_date)
+
+
+class SearchResult(BaseModel):
+    """Unified response for any structured or natural-language search."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
     intent: str
-    parsed: ParsedIntent
     cinemas: list[Cinema] = Field(default_factory=list)
     movies: list[Movie] = Field(default_factory=list)
     shows: list[Show] = Field(default_factory=list)
     total_results: int = Field(default=0, alias="totalResults")
+
+
+class NaturalLanguageResult(SearchResult):
+    """Unified response for a natural-language search."""
+
+    prompt: str
+    parsed: ParsedIntent
 
 
 class NaturalLanguageSearchService:
@@ -187,6 +278,56 @@ class NaturalLanguageSearchService:
             movies=movies,
             shows=shows,
             total_results=total,
+        )
+
+    async def structured_search(
+        self,
+        request: StructuredSearchQuery,
+        live_service: KinoheldService,
+        cache: KinoheldCache,
+    ) -> SearchResult:
+        """Run a deterministic search using explicit UI filters."""
+        parsed = self._structured_to_parsed(request)
+
+        cinemas, movies, shows = await self._execute_intent(
+            parsed,
+            live_service,
+            cache,
+            request.use_cache,
+            request.limit,
+        )
+
+        total = len(cinemas) + len(movies) + len(shows)
+        return SearchResult(
+            intent=parsed.intent,
+            cinemas=cinemas,
+            movies=movies,
+            shows=shows,
+            total_results=total,
+        )
+
+    @staticmethod
+    def _structured_to_parsed(request: StructuredSearchQuery) -> ParsedIntent:
+        """Convert a structured query into the internal ParsedIntent shape."""
+        return ParsedIntent(
+            intent=request.intent,
+            search_query=request.search_query,
+            genres=request.genres,
+            date=request.date,
+            location=request.location,
+            cinema_id=request.cinema_id,
+            flags=request.flags,
+            language=request.language,
+            duration_min=request.duration_min,
+            duration_max=request.duration_max,
+            year=request.year,
+            year_min=request.year_min,
+            year_max=request.year_max,
+            rating_min=request.rating_min,
+            rating_max=request.rating_max,
+            actors=request.actors,
+            directors=request.directors,
+            cast=request.cast,
         )
 
     # ------------------------------------------------------------------

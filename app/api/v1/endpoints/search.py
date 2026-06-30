@@ -1,4 +1,4 @@
-"""Natural-language search route."""
+"""Search routes: natural language and structured/filter panel."""
 
 from typing import Annotated
 
@@ -16,6 +16,8 @@ from app.services.nl_search import (
     NaturalLanguageQuery,
     NaturalLanguageResult,
     NaturalLanguageSearchService,
+    SearchResult,
+    StructuredSearchQuery,
 )
 
 router = APIRouter(prefix="/search", tags=["search"])
@@ -41,3 +43,21 @@ async def natural_language_search(
     """
     search_service = NaturalLanguageSearchService(llm_client)
     return await search_service.search(request, service, cache)
+
+
+@router.post("/structured", response_model=SearchResult)
+async def structured_search(
+    request: StructuredSearchQuery,
+    llm_client: LLMDep,
+    service: ServiceDep,
+    cache: CacheDep,
+) -> SearchResult:
+    """Search cinemas, movies, or shows using explicit UI filters.
+
+    This endpoint skips LLM parsing and applies the provided filters
+    deterministically. Ideal for filter panels, sliders, and toggles.
+    Set `useCache: true` to query the local Kinoheld cache instead of
+    the live API.
+    """
+    search_service = NaturalLanguageSearchService(llm_client)
+    return await search_service.structured_search(request, service, cache)

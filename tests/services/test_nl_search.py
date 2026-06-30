@@ -14,6 +14,7 @@ from app.services.nl_search import (
     NaturalLanguageQuery,
     NaturalLanguageSearchService,
     ParsedIntent,
+    StructuredSearchQuery,
 )
 
 
@@ -316,3 +317,79 @@ async def test_heuristic_extracts_duration_max() -> None:
     parsed = NaturalLanguageSearchService._heuristic_parse("horror movies under 90 minutes")
     assert parsed.duration_max == 90
     assert parsed.genres == ["Horror"]
+
+
+async def test_structured_search_movies(
+    nl_service: NaturalLanguageSearchService,
+    mock_live_service: AsyncMock,
+    empty_cache: KinoheldCache,
+    sample_movie: Movie,
+    sample_movie_long: Movie,
+) -> None:
+    mock_live_service.search_movies = AsyncMock(return_value=[sample_movie, sample_movie_long])
+
+    request = StructuredSearchQuery(
+        intent="movies",
+        genres=["Horror"],
+        duration_max=100,
+    )
+    result = await nl_service.structured_search(request, mock_live_service, empty_cache)
+
+    assert result.intent == "movies"
+    assert [m.id for m in result.movies] == ["m1"]
+
+
+async def test_structured_search_movies_by_actor(
+    nl_service: NaturalLanguageSearchService,
+    mock_live_service: AsyncMock,
+    empty_cache: KinoheldCache,
+    sample_movie: Movie,
+    sample_movie_long: Movie,
+) -> None:
+    mock_live_service.search_movies = AsyncMock(return_value=[sample_movie, sample_movie_long])
+
+    request = StructuredSearchQuery(
+        intent="movies",
+        genres=["Drama"],
+        actors=["Jaylen Hunter"],
+    )
+    result = await nl_service.structured_search(request, mock_live_service, empty_cache)
+
+    assert result.intent == "movies"
+    assert [m.id for m in result.movies] == ["m2"]
+
+
+async def test_structured_to_parsed() -> None:
+    request = StructuredSearchQuery(
+        intent="movies",
+        genres=["Comedy"],
+        duration_min=80,
+        duration_max=120,
+        year_min=2020,
+        rating_min=7.0,
+        actors=["Jim Carrey"],
+    )
+    parsed = NaturalLanguageSearchService._structured_to_parsed(request)
+
+    assert parsed.intent == "movies"
+    assert parsed.genres == ["Comedy"]
+    assert parsed.duration_min == 80
+    assert parsed.duration_max == 120
+    assert parsed.year_min == 2020
+    assert parsed.rating_min == 7.0
+    assert parsed.actors == ["Jim Carrey"]
+
+
+async def test_structured_search_cinemas(
+    nl_service: NaturalLanguageSearchService,
+    mock_live_service: AsyncMock,
+    empty_cache: KinoheldCache,
+    sample_cinema: Cinema,
+) -> None:
+    mock_live_service.search_cinemas = AsyncMock(return_value=[sample_cinema])
+
+    request = StructuredSearchQuery(intent="cinemas", location="Berlin")
+    result = await nl_service.structured_search(request, mock_live_service, empty_cache)
+
+    assert result.intent == "cinemas"
+    assert [c.id for c in result.cinemas] == ["c1"]
