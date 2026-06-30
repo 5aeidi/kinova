@@ -1,6 +1,10 @@
 """FastAPI application entrypoint."""
 
+import asyncio
+import contextlib
 import logging
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,11 +12,48 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.router import api_router
 from app.core.config import settings
 from app.core.exceptions import KinovaError, generic_exception_handler, kinova_exception_handler
+from app.services.cache import KinoheldCache
+from app.services.graphql_client import GraphQLClient
+from app.services.kinoheld import KinoheldService
+from app.services.sync import run_periodic_sync
 
 logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
 )
+
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Manage the Kinoheld cache and background sync task."""
+    cache = KinoheldCache()
+    app.state.kinoheld_cache = cache
+
+    sync_task: asyncio.Task[None] | None = None
+    client: GraphQLClient | None = None
+
+    try:
+        client = GraphQLClient()
+        service = KinoheldService(client)
+        app.state.kinoheld_service = service
+
+        logger.info("Performing initial Kinoheld cache refresh")
+        with contextlib.suppress(Exception):
+            await cache.refresh(service)
+
+        sync_task = asyncio.create_task(
+            run_periodic_sync(cache, service, settings.kinoheld_sync_interval_seconds),
+        )
+        yield
+    finally:
+        if sync_task is not None:
+            sync_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sync_task
+        if client is not None:
+            await client.close()
 
 
 def create_application() -> FastAPI:
@@ -23,6 +64,7 @@ def create_application() -> FastAPI:
         version="0.1.0",
         docs_url="/docs",
         redoc_url="/redoc",
+        lifespan=lifespan,
     )
 
     app.add_middleware(

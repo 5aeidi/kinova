@@ -36,6 +36,34 @@ class Settings(BaseSettings):
         description="Optional affiliate key for commissionable links",
     )
 
+    # Local cache / sync settings
+    kinoheld_sync_interval_seconds: int = Field(
+        default=600,
+        description="How often to refresh the local Kinoheld cache",
+    )
+    kinoheld_sync_cinema_ids: list[str] = Field(
+        default_factory=list,
+        description="Cinema IDs to pre-fetch shows for during cache refresh",
+    )
+    kinoheld_sync_show_days: int = Field(
+        default=7,
+        ge=1,
+        le=30,
+        description="Number of days to fetch shows for during cache refresh",
+    )
+    kinoheld_sync_movie_limit: int = Field(
+        default=100,
+        ge=1,
+        le=500,
+        description="Max movies to fetch per cache refresh",
+    )
+    kinoheld_sync_cinema_limit: int = Field(
+        default=100,
+        ge=1,
+        le=500,
+        description="Max cinemas to fetch per cache refresh",
+    )
+
     @property
     def api_v1_prefix(self) -> str:
         return "/api/v1"
