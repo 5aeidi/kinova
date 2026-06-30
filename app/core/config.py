@@ -64,6 +64,40 @@ class Settings(BaseSettings):
         description="Max cinemas to fetch per cache refresh",
     )
 
+    # Natural-language search / LLM
+    llm_base_url: str = Field(
+        default="https://api.groq.com/openai/v1",
+        description="OpenAI-compatible base URL for the LLM provider",
+    )
+    llm_api_key: str | None = Field(
+        default=None,
+        description="API key for the LLM provider",
+    )
+    llm_model: str = Field(
+        default="llama-3.3-70b-versatile",
+        description="Model name to use for natural-language search",
+    )
+    llm_request_timeout: float = Field(
+        default=60.0,
+        description="Timeout in seconds for LLM requests",
+    )
+    llm_max_tokens: int = Field(
+        default=1024,
+        ge=1,
+        le=4096,
+        description="Max tokens for LLM response",
+    )
+    llm_temperature: float = Field(
+        default=0.0,
+        ge=0.0,
+        le=2.0,
+        description="LLM sampling temperature",
+    )
+    llm_fallback_search_enabled: bool = Field(
+        default=True,
+        description="Run a fallback text search when LLM parsing fails",
+    )
+
     @property
     def api_v1_prefix(self) -> str:
         return "/api/v1"
