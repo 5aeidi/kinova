@@ -69,6 +69,51 @@ class ParsedIntent(BaseModel):
         description="Language hint extracted from the prompt",
     )
 
+    # Numeric / structured filters that Kinoheld does not support as query params.
+    duration_min: int | None = Field(
+        default=None,
+        alias="durationMin",
+        ge=0,
+        description="Minimum movie duration in minutes",
+    )
+    duration_max: int | None = Field(
+        default=None,
+        alias="durationMax",
+        ge=0,
+        description="Maximum movie duration in minutes",
+    )
+    year_min: int | None = Field(
+        default=None,
+        alias="yearMin",
+        description="Minimum production year",
+    )
+    year_max: int | None = Field(
+        default=None,
+        alias="yearMax",
+        description="Maximum production year",
+    )
+    year: int | None = Field(default=None, description="Exact production year")
+    rating_min: float | None = Field(
+        default=None,
+        alias="ratingMin",
+        ge=0,
+        le=10,
+        description="Minimum IMDb rating",
+    )
+    rating_max: float | None = Field(
+        default=None,
+        alias="ratingMax",
+        ge=0,
+        le=10,
+        description="Maximum IMDb rating",
+    )
+    actors: list[str] = Field(default_factory=list, description="Actor names")
+    directors: list[str] = Field(default_factory=list, description="Director names")
+    cast: list[str] = Field(
+        default_factory=list,
+        description="Any cast/creator names (actor or director)",
+    )
+
     @field_validator("date")
     @classmethod
     def _normalise_relative_date(cls, value: str | None) -> str | None:
@@ -151,29 +196,46 @@ class NaturalLanguageSearchService:
         today = dt.date.today()
         tomorrow = today + dt.timedelta(days=1)
         system_message = (
-            f"You are a structured-intent parser for a cinema search API.\n"
+            "You are a structured-intent parser for a cinema search API. "
+            "Extract every filter mentioned in the prompt and respond ONLY with a "
+            "single JSON object.\n"
             f"Today's date is {today.isoformat()} and tomorrow is {tomorrow.isoformat()}.\n"
             "\n"
-            "Given a user prompt, extract the search intent and parameters. "
-            "Respond ONLY with a JSON object matching this schema:\n"
-            "\n"
+            "JSON schema:\n"
             "{\n"
             '  "intent": "movies|shows|cinemas|unknown",\n'
-            '  "searchQuery": "string or null",\n'
-            '  "genres": ["list of genre names"],\n'
-            '  "date": "YYYY-MM-DD or relative term today/tomorrow",\n'
-            '  "location": "city/location name or null",\n'
+            '  "searchQuery": "free-text title or cinema name, or null",\n'
+            '  "genres": ["genre names like Horror, Drama, Comedy"],\n'
+            '  "date": "YYYY-MM-DD, today, tomorrow, or null",\n'
+            '  "location": "city name or null",\n'
             '  "cinemaId": "Kinoheld cinema ID or null",\n'
-            '  "flags": ["list of show flags like OmU, OV, 3D, IMAX"],\n'
-            '  "language": "language hint like English, German or null"\n'
+            '  "flags": ["show flags: OmU, OV, 3D, IMAX, etc."],\n'
+            '  "language": "English, German, etc., or null",\n'
+            '  "durationMin": integer or null,\n'
+            '  "durationMax": integer or null,\n'
+            '  "year": integer or null,\n'
+            '  "yearMin": integer or null,\n'
+            '  "yearMax": integer or null,\n'
+            '  "ratingMin": 0-10 float or null,\n'
+            '  "ratingMax": 0-10 float or null,\n'
+            '  "actors": ["actor names"],\n'
+            '  "directors": ["director names"],\n'
+            '  "cast": ["any actor or director names when role is unclear"]\n'
             "}\n"
             "\n"
-            "Rules:\n"
-            '- "OmU" = original version with subtitles; '
-            '"OV" = original version without subtitles; '
-            '"englische Untertitel" / "English subtitles" should be flagged as "OmU".\n'
-            '- Infer relative dates: "tomorrow" -> "tomorrow", "today" -> "today".\n'
-            '- Infer genre from adjectives like "horror", "comedy", "action".\n'
+            "Extraction rules:\n"
+            "- Always set durationMax for phrases like 'under X minutes', 'below X min', "
+            "'shorter than X'.\n"
+            "- Always set durationMin for phrases like 'over X minutes', 'above X min', "
+            "'longer than X'.\n"
+            "- For 'X minutes' or 'X min' with no comparator, treat as durationMax.\n"
+            "- For year ranges like '2020s', set yearMin=2020 and yearMax=2029.\n"
+            "- 'from 2023' means yearMin=2023; 'before 2010' means yearMax=2009.\n"
+            "- 'starring X', 'with X', 'in which X acts' -> actors=[X].\n"
+            "- 'directed by X', 'by director X' -> directors=[X].\n"
+            "- If it is unclear whether a person is actor or director, put them in cast.\n"
+            '- "OmU" = original with subtitles; "OV" = original without subtitles; '
+            '"English subtitles" /> "OmU".\n'
             '- If the prompt asks for showtimes/screenings, intent is "shows"; '
             'if it asks for cinemas/theatres, intent is "cinemas"; '
             'otherwise default to "movies".\n'
@@ -222,6 +284,8 @@ class NaturalLanguageSearchService:
 
         language = "English" if any(phrase in text for phrase in ("english", "englisch")) else None
 
+        duration_max = NaturalLanguageSearchService._extract_duration_max(text)
+
         return ParsedIntent(
             intent=intent,
             search_query=None,
@@ -230,7 +294,21 @@ class NaturalLanguageSearchService:
             location=None,
             flags=flags,
             language=language,
+            duration_max=duration_max,
         )
+
+    @staticmethod
+    def _extract_duration_max(text: str) -> int | None:
+        """Best-effort regex for 'under X minutes' in the heuristic fallback."""
+        import re
+
+        match = re.search(
+            r"(?:under|below|less than|shorter than)\s+(\d+)\s*(?:min|minutes?)",
+            text,
+        )
+        if match:
+            return int(match.group(1))
+        return None
 
     # ------------------------------------------------------------------
     # Execution
@@ -282,25 +360,161 @@ class NaturalLanguageSearchService:
         use_cache: bool,
         limit: int,
     ) -> list[Movie]:
+        # Fetch a generous candidate set so post-filters have enough data.
+        candidate_limit = max(limit, 100)
         params = MovieSearchParams(
             search=parsed.search_query,
             location=parsed.location,
-            limit=limit,
+            limit=candidate_limit,
         )
         if use_cache:
             movies = await cache.search_movies(params)
         else:
             movies = await live_service.search_movies(params)
 
-        # Post-filter by genre when not supported by upstream params.
-        if parsed.genres:
-            movies = self._filter_by_genres(movies, parsed.genres)
+        # Apply deterministic post-filters.
+        movies = self._apply_movie_filters(movies, parsed)
 
         if parsed.search_query and settings.llm_fallback_search_enabled and not movies:
             logger.info("No movies found by upstream search; trying fallback title search")
             movies = self._fallback_text_search(movies if use_cache else [], parsed.search_query)
+            movies = self._apply_movie_filters(movies, parsed)
 
         return movies[:limit]
+
+    def _apply_movie_filters(
+        self,
+        movies: list[Movie],
+        parsed: ParsedIntent,
+    ) -> list[Movie]:
+        if parsed.genres:
+            movies = self._filter_by_genres(movies, parsed.genres)
+        if parsed.duration_min is not None or parsed.duration_max is not None:
+            movies = self._filter_by_duration(movies, parsed.duration_min, parsed.duration_max)
+        if parsed.year is not None or parsed.year_min is not None or parsed.year_max is not None:
+            movies = self._filter_by_year(movies, parsed.year, parsed.year_min, parsed.year_max)
+        if parsed.rating_min is not None or parsed.rating_max is not None:
+            movies = self._filter_by_rating(movies, parsed.rating_min, parsed.rating_max)
+        if parsed.actors or parsed.directors or parsed.cast:
+            movies = self._filter_by_people(
+                movies,
+                actors=parsed.actors,
+                directors=parsed.directors,
+                cast=parsed.cast,
+            )
+        if parsed.language:
+            movies = self._filter_by_language_hint(movies, parsed.language)
+        return movies
+
+    @staticmethod
+    def _filter_by_duration(
+        movies: list[Movie],
+        min_minutes: int | None,
+        max_minutes: int | None,
+    ) -> list[Movie]:
+        results = []
+        for m in movies:
+            if m.duration is None:
+                continue
+            if min_minutes is not None and m.duration < min_minutes:
+                continue
+            if max_minutes is not None and m.duration > max_minutes:
+                continue
+            results.append(m)
+        return results
+
+    @staticmethod
+    def _filter_by_year(
+        movies: list[Movie],
+        year: int | None,
+        year_min: int | None,
+        year_max: int | None,
+    ) -> list[Movie]:
+        def _match(m: Movie) -> bool:
+            if m.production_year is None:
+                return False
+            try:
+                value = int(m.production_year)
+            except (ValueError, TypeError):
+                return False
+            if year is not None and value != year:
+                return False
+            if year_min is not None and value < year_min:
+                return False
+            if year_max is not None and value > year_max:
+                return False
+            return True
+
+        return [m for m in movies if _match(m)]
+
+    @staticmethod
+    def _filter_by_rating(
+        movies: list[Movie],
+        rating_min: float | None,
+        rating_max: float | None,
+    ) -> list[Movie]:
+        results = []
+        for m in movies:
+            if m.imdb_rating is None:
+                continue
+            if rating_min is not None and m.imdb_rating < rating_min:
+                continue
+            if rating_max is not None and m.imdb_rating > rating_max:
+                continue
+            results.append(m)
+        return results
+
+    @staticmethod
+    def _filter_by_people(
+        movies: list[Movie],
+        actors: list[str],
+        directors: list[str],
+        cast: list[str],
+    ) -> list[Movie]:
+        all_actors = {name.casefold() for name in actors + cast}
+        all_directors = {name.casefold() for name in directors + cast}
+
+        def _name_matches(persons: list, names: set[str]) -> bool:
+            return any(p.name and p.name.casefold() in names for p in persons)
+
+        return [
+            m
+            for m in movies
+            if (all_actors and _name_matches(m.actors, all_actors))
+            or (all_directors and _name_matches(m.directors, all_directors))
+        ]
+
+    @staticmethod
+    def _filter_by_language_hint(movies: list[Movie], language: str) -> list[Movie]:
+        """Soft filter: keep movies whose metadata mentions the language.
+
+        Kinoheld does not expose a per-movie language field, so this is a
+        best-effort heuristic based on title, description, and additional
+        description. Use with caution.
+        """
+        lang = language.casefold()
+        keywords = {
+            "english": ["english", "englisch"],
+            "german": ["german", "deutsch"],
+            "french": ["french", "französisch"],
+            "spanish": ["spanish", "spanisch"],
+            "italian": ["italian", "italienisch"],
+        }
+        terms = keywords.get(lang, [lang])
+
+        def _mentions(movie: Movie) -> bool:
+            haystack = " ".join(
+                part
+                for part in (
+                    movie.title,
+                    movie.description,
+                    movie.additional_description,
+                )
+                if part
+            ).casefold()
+            return any(term in haystack for term in terms)
+
+        return [m for m in movies if _mentions(m)]
 
     async def _search_shows(
         self,
@@ -326,9 +540,9 @@ class NaturalLanguageSearchService:
             movies = await self._search_movies(parsed, live_service, cache, use_cache, limit)
             return [], movies, []
 
-        # Determine target movies when a title/genre is specified.
+        # Determine target movies when a title/genre/actor/director is specified.
         movie_ids: set[str] | None = None
-        if parsed.search_query or parsed.genres:
+        if parsed.search_query or parsed.genres or parsed.actors or parsed.directors or parsed.cast:
             movie_params = MovieSearchParams(
                 search=parsed.search_query,
                 location=parsed.location,
@@ -338,8 +552,7 @@ class NaturalLanguageSearchService:
                 candidate_movies = await cache.search_movies(movie_params)
             else:
                 candidate_movies = await live_service.search_movies(movie_params)
-            if parsed.genres:
-                candidate_movies = self._filter_by_genres(candidate_movies, parsed.genres)
+            candidate_movies = self._apply_movie_filters(candidate_movies, parsed)
             movie_ids = {m.id for m in candidate_movies}
 
         shows: list[Show] = []

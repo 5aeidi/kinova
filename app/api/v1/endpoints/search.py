@@ -34,7 +34,10 @@ async def natural_language_search(
 ) -> NaturalLanguageResult:
     """Search cinemas, movies, or shows using a natural-language prompt.
 
-    Set `useCache: true` to query the local Kinoheld cache instead of the live API.
+    The prompt is parsed into structured filters (intent, genres, duration,
+    year, rating, actors, directors, etc.) by an LLM, then executed against
+    Kinoheld with deterministic post-filtering. Set `useCache: true` to query
+    the local Kinoheld cache instead of the live API.
     """
     search_service = NaturalLanguageSearchService(llm_client)
     return await search_service.search(request, service, cache)
