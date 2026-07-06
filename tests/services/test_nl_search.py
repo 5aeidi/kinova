@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from app.schemas.cinema import Cinema
+from app.schemas.cinema import Cinema, CitySummary
 from app.schemas.movie import Movie, Person
 from app.schemas.show import Show, ShowFlag
 from app.services.cache import KinoheldCache
@@ -393,3 +393,38 @@ async def test_structured_search_cinemas(
 
     assert result.intent == "cinemas"
     assert [c.id for c in result.cinemas] == ["c1"]
+
+
+async def test_structured_search_shows_with_location_uses_cache_filter(
+    nl_service: NaturalLanguageSearchService,
+    mock_live_service: AsyncMock,
+    empty_cache: KinoheldCache,
+    sample_cinema: Cinema,
+    sample_movie: Movie,
+    sample_show: Show,
+) -> None:
+    # Cinemas must be filtered by location; only the Berlin cinema should be used.
+    berlin_cinema = Cinema(id="c1", name="CineStar Berlin", city=CitySummary(name="Berlin"))
+    munich_cinema = Cinema(id="c2", name="Mathäser München", city=CitySummary(name="Munich"))
+    empty_cache._cinemas = [berlin_cinema, munich_cinema]
+    empty_cache._movies = [sample_movie]
+    empty_cache._shows = {
+        f"c1::{dt.date.today().isoformat()}": [sample_show],
+    }
+
+    mock_live_service.search_shows = AsyncMock(return_value=[])
+
+    request = StructuredSearchQuery(
+        intent="shows",
+        location="Berlin",
+        date=dt.date.today().isoformat(),
+        use_cache=True,
+    )
+    result = await nl_service.structured_search(request, mock_live_service, empty_cache)
+
+    assert result.intent == "shows"
+    assert [c.id for c in result.cinemas] == ["c1"]
+    assert len(result.shows) == 1
+    assert result.shows[0].id == sample_show.id
+    # The Munich cinema should not trigger a live shows lookup.
+    mock_live_service.search_shows.assert_not_awaited()

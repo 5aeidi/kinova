@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.core.exceptions import KinoheldNotFoundError
-from app.schemas.cinema import Cinema, CinemaSearchParams
+from app.schemas.cinema import Cinema, CinemaSearchParams, CitySummary
 from app.schemas.city import City, CitySearchParams
 from app.schemas.common import Geo
 from app.schemas.movie import Movie, MovieSearchParams
@@ -75,6 +75,17 @@ class TestSearchCinemas:
 
         assert [c.id for c in results] == ["1"]
 
+    async def test_filters_by_location_without_distance(self, cache: KinoheldCache):
+        berlin = Cinema(id="1", name="Berlin Kino", city=CitySummary(name="Berlin"))
+        munich = Cinema(id="2", name="Munich Kino", city=CitySummary(name="Munich"))
+        cache._cinemas = [berlin, munich]
+
+        results = await cache.search_cinemas(
+            CinemaSearchParams(location="Berlin", limit=10),
+        )
+
+        assert [c.id for c in results] == ["1"]
+
 
 @pytest.mark.asyncio
 class TestSearchMovies:
@@ -84,6 +95,23 @@ class TestSearchMovies:
         results = await cache.search_movies(MovieSearchParams(search="dune", limit=10))
 
         assert [m.id for m in results] == ["1"]
+
+    async def test_filters_by_location_without_distance(self, cache: KinoheldCache):
+        berlin_cinema = Cinema(id="c1", name="Berlin Kino", city=CitySummary(name="Berlin"))
+        munich_cinema = Cinema(id="c2", name="Munich Kino", city=CitySummary(name="Munich"))
+        berlin_movie = Movie(id="m1", title="Berlin Movie")
+        munich_movie = Movie(id="m2", title="Munich Movie")
+
+        cache._cinemas = [berlin_cinema, munich_cinema]
+        cache._movies = [berlin_movie, munich_movie]
+        cache._shows = {
+            "c1::2024-06-15": [Show(id="s1", name="Show", movie=berlin_movie)],
+            "c2::2024-06-15": [Show(id="s2", name="Show", movie=munich_movie)],
+        }
+
+        results = await cache.search_movies(MovieSearchParams(location="Berlin", limit=10))
+
+        assert [m.id for m in results] == ["m1"]
 
 
 @pytest.mark.asyncio
@@ -102,6 +130,21 @@ class TestSearchShows:
 
         assert len(results) == 1
         assert results[0].id == "s1"
+
+    async def test_filters_by_days_range(self, cache: KinoheldCache):
+        show_today = Show(id="s1", name="Today")
+        show_tomorrow = Show(id="s2", name="Tomorrow")
+        cache._shows = {
+            "123::2024-06-15": [show_today],
+            "123::2024-06-16": [show_tomorrow],
+        }
+
+        results = await cache.search_shows(
+            ShowSearchParams(cinema_id="123", date=dt.date(2024, 6, 15), days=2),
+        )
+
+        assert len(results) == 2
+        assert {s.id for s in results} == {"s1", "s2"}
 
 
 @pytest.mark.asyncio

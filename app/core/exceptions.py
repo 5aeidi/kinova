@@ -1,7 +1,11 @@
 """Application-specific exceptions and error handlers."""
 
+import logging
+
 from fastapi import Request, status
 from fastapi.responses import JSONResponse
+
+logger = logging.getLogger(__name__)
 
 
 class KinovaError(Exception):
@@ -28,17 +32,37 @@ class KinoheldNotFoundError(KinovaError):
         super().__init__(message, status.HTTP_404_NOT_FOUND)
 
 
+def _apply_cors_headers(request: Request, response: JSONResponse) -> JSONResponse:
+    """Mirror CORS headers on error responses.
+
+    Starlette's CORSMiddleware does not wrap responses produced by exception
+    handlers, so browsers may block error responses. This helper adds the same
+    permissive headers configured in ``app.main``.
+    """
+    origin = request.headers.get("origin")
+    if origin:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+    else:
+        response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Credentials"] = "true"
+    return response
+
+
 async def kinova_exception_handler(request: Request, exc: KinovaError) -> JSONResponse:
     """Handle application exceptions uniformly."""
     body: dict = {"detail": exc.message}
     if isinstance(exc, KinoheldAPIError) and exc.upstream_errors:
         body["upstream_errors"] = exc.upstream_errors
-    return JSONResponse(status_code=exc.status_code, content=body)
+    response = JSONResponse(status_code=exc.status_code, content=body)
+    return _apply_cors_headers(request, response)
 
 
 async def generic_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     """Catch-all handler for unexpected errors."""
-    return JSONResponse(
+    logger.exception("Unhandled exception for %s %s", request.method, request.url)
+    response = JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={"detail": "An unexpected error occurred."},
     )
+    return _apply_cors_headers(request, response)

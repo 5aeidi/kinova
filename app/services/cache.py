@@ -114,6 +114,12 @@ class KinoheldCache:
 
         if location and distance is not None:
             cinemas = self._filter_by_location(cinemas, location, distance)
+        elif location:
+            cinemas = [
+                cinema
+                for cinema in cinemas
+                if _matches(cinema.city.name if cinema.city else None, location)
+            ]
 
         results = [
             cinema
@@ -161,6 +167,16 @@ class KinoheldCache:
                 nearby_cinemas = self._filter_by_location(list(self._cinemas), location, distance)
             nearby_ids = {c.id for c in nearby_cinemas}
             movies = self._filter_movies_by_cinemas(movies, nearby_ids)
+        elif location:
+            # Same approximation, but match cinemas whose city name contains the location.
+            async with self._lock:
+                matching_cinemas = [
+                    cinema
+                    for cinema in self._cinemas
+                    if _matches(cinema.city.name if cinema.city else None, location)
+                ]
+            matching_ids = {c.id for c in matching_cinemas}
+            movies = self._filter_movies_by_cinemas(movies, matching_ids)
 
         if query:
             movies = [m for m in movies if _matches(m.title, query)]
@@ -185,12 +201,15 @@ class KinoheldCache:
     # ------------------------------------------------------------------
     async def search_shows(self, params: ShowSearchParams) -> list[Show]:
         cinema_id = params.cinema_id
-        date = params.date or dt.date.today()
-        date_str = date.isoformat()
-        key = f"{cinema_id}::{date_str}"
+        base_date = params.date or dt.date.today()
+        days = params.days or 1
 
-        async with self._lock:
-            shows = list(self._shows.get(key, []))
+        shows: list[Show] = []
+        for offset in range(days):
+            date = base_date + dt.timedelta(days=offset)
+            key = f"{cinema_id}::{date.isoformat()}"
+            async with self._lock:
+                shows.extend(list(self._shows.get(key, [])))
 
         if params.movie_id:
             shows = [s for s in shows if s.movie is not None and s.movie.id == params.movie_id]
@@ -219,6 +238,15 @@ class KinoheldCache:
 
         async with self._lock:
             self._shows.update(fetched)
+
+    async def get_missing_show_dates(
+        self,
+        cinema_id: str,
+        dates: Iterable[str],
+    ) -> list[str]:
+        """Return the subset of ``dates`` that is not yet cached for ``cinema_id``."""
+        async with self._lock:
+            return [date_str for date_str in dates if f"{cinema_id}::{date_str}" not in self._shows]
 
     # ------------------------------------------------------------------
     # Cities

@@ -36,6 +36,7 @@ async def internal_health_check(cache: CacheDep) -> dict[str, str | int | list[s
         "cached_movies": snapshot["movies"],
         "cached_cities": snapshot["cities"],
         "cached_genres": snapshot["genres"],
+        "cached_shows": sum(snapshot["shows"].values()),
     }
 
 
@@ -92,23 +93,22 @@ async def list_shows_internal(
 ) -> list[Show]:
     """List cached shows for a cinema, optionally filtered by date and movie.
 
-    If shows for the requested cinema/date are not in the cache, they are
-    fetched on demand and stored for subsequent requests.
+    If any requested dates are missing from the cache, they are fetched on demand
+    and stored for subsequent requests.
     """
     shows = await cache.search_shows(params)
-    if shows:
-        return shows
 
-    # On-demand fetch for cinemas/dates outside the pre-configured sync list.
     cinema_id = params.cinema_id
     base_date = params.date or dt.date.today()
-    dates = [
-        (base_date + dt.timedelta(days=offset)).isoformat()
-        for offset in range(settings.kinoheld_sync_show_days)
-    ]
-    await cache.cache_shows_for_cinema(service, cinema_id, dates)
-    # Re-run the search now that the cache is populated for the requested date.
-    return await cache.search_shows(params)
+    days = params.days or settings.kinoheld_sync_show_days
+    dates = [(base_date + dt.timedelta(days=offset)).isoformat() for offset in range(days)]
+
+    missing_dates = await cache.get_missing_show_dates(cinema_id, dates)
+    if missing_dates:
+        await cache.cache_shows_for_cinema(service, cinema_id, missing_dates)
+        shows = await cache.search_shows(params)
+
+    return shows
 
 
 @router.get("/shows/{show_id}", response_model=Show)

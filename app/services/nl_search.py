@@ -707,13 +707,10 @@ class NaturalLanguageSearchService:
             )
             if use_cache:
                 cinema_shows = await cache.search_shows(params)
-                if not cinema_shows:
-                    # On-demand fill for the requested date range.
-                    await cache.cache_shows_for_cinema(
-                        live_service,
-                        cinema.id,
-                        self._date_range(date),
-                    )
+                date_range = self._date_range(date)
+                missing_dates = await cache.get_missing_show_dates(cinema.id, date_range)
+                if missing_dates:
+                    await cache.cache_shows_for_cinema(live_service, cinema.id, missing_dates)
                     cinema_shows = await cache.search_shows(params)
             else:
                 cinema_shows = await live_service.search_shows(params)
