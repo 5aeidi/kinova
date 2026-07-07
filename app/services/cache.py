@@ -146,6 +146,12 @@ class KinoheldCache:
                     return cinema
         raise KinoheldNotFoundError(f"Cinema {cinema_id} not found")
 
+    async def add_cinemas(self, cinemas: list[Cinema]) -> None:
+        """Merge new cinemas into the cache, avoiding duplicates by ID."""
+        async with self._lock:
+            existing_ids = {c.id for c in self._cinemas}
+            self._cinemas.extend([c for c in cinemas if c.id not in existing_ids])
+
     # ------------------------------------------------------------------
     # Movies
     # ------------------------------------------------------------------
@@ -238,6 +244,11 @@ class KinoheldCache:
 
         async with self._lock:
             self._shows.update(fetched)
+
+    async def has_any_shows(self, cinema_id: str) -> bool:
+        """Return True if any shows are cached for ``cinema_id``."""
+        async with self._lock:
+            return any(key.startswith(f"{cinema_id}::") for key in self._shows)
 
     async def get_missing_show_dates(
         self,

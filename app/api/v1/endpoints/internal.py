@@ -47,9 +47,14 @@ async def internal_health_check(cache: CacheDep) -> dict[str, str | int | list[s
 async def list_cinemas_internal(
     params: Annotated[CinemaSearchParams, Depends()],
     cache: CacheDep,
+    service: CachedServiceDep,
 ) -> list[Cinema]:
-    """Search cached cinemas."""
-    return await cache.search_cinemas(params)
+    """Search cached cinemas, falling back to live Kinoheld for location queries."""
+    cinemas = await cache.search_cinemas(params)
+    if params.location and not cinemas:
+        cinemas = await service.search_cinemas(params)
+        await cache.add_cinemas(cinemas)
+    return cinemas
 
 
 @router.get("/cinemas/{cinema_id}", response_model=Cinema)
@@ -68,8 +73,30 @@ async def get_cinema_internal(
 async def list_movies_internal(
     params: Annotated[MovieSearchParams, Depends()],
     cache: CacheDep,
+    service: CachedServiceDep,
 ) -> list[Movie]:
-    """Search cached movies."""
+    """Search cached movies, fetching show data on demand for location filters."""
+    if not params.location:
+        return await cache.search_movies(params)
+
+    # Find cinemas in the requested location from the cache.
+    cinema_params = CinemaSearchParams(location=params.location, limit=100)
+    cinemas = await cache.search_cinemas(cinema_params)
+    if not cinemas:
+        # Cache miss for this location; fall back to live Kinoheld.
+        return await service.search_movies(params)
+
+    # Ensure we have show data for the location's cinemas so the movie filter
+    # can determine which movies are playing there. Only fetch when a cinema
+    # has no cached shows at all to avoid unnecessary live requests.
+    cinema_ids = {c.id for c in cinemas}
+    base_date = dt.date.today()
+    days = settings.kinoheld_sync_show_days
+    date_range = [(base_date + dt.timedelta(days=offset)).isoformat() for offset in range(days)]
+    for cinema_id in cinema_ids:
+        if not await cache.has_any_shows(cinema_id):
+            await cache.cache_shows_for_cinema(service, cinema_id, date_range)
+
     return await cache.search_movies(params)
 
 

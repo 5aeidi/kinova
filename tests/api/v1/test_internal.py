@@ -79,6 +79,67 @@ class TestInternalMovies:
         assert len(data) == 1
         assert data[0]["id"] == "99"
 
+    def test_list_movies_filters_by_location_fetching_shows_on_demand(
+        self,
+        internal_client: TestClient,
+        mock_graphql_client: AsyncMock,
+    ):
+        cache = internal_client.app.state.kinoheld_cache
+        berlin_movie = Movie(id="m1", title="Berlin Movie")
+        munich_movie = Movie(id="m2", title="Munich Movie")
+        cache._movies = [berlin_movie, munich_movie]
+        cache._cinemas = [
+            Cinema(id="c1", name="Berlin Kino", city=CitySummary(name="Berlin")),
+            Cinema(id="c2", name="Munich Kino", city=CitySummary(name="Munich")),
+        ]
+        # No shows cached initially; the endpoint should fetch them on demand.
+        mock_graphql_client.execute.return_value = {
+            "shows": [
+                {
+                    "id": "s1",
+                    "name": "Show",
+                    "beginning": {"formatted": "20:00", "timestamp": 1718452800},
+                    "flags": [],
+                    "movie": {"id": "m1", "title": "Berlin Movie", "genres": []},
+                    "auditorium": {"id": "a1", "name": "Saal 1"},
+                },
+            ],
+        }
+
+        response = internal_client.get("/api/v1/internal/movies?location=Berlin")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["id"] == "m1"
+
+    def test_list_movies_falls_back_to_live_on_location_cache_miss(
+        self,
+        internal_client: TestClient,
+        mock_graphql_client: AsyncMock,
+    ):
+        cache = internal_client.app.state.kinoheld_cache
+        cache._cinemas = [
+            Cinema(id="c2", name="Munich Kino", city=CitySummary(name="Munich")),
+        ]
+        mock_graphql_client.execute.return_value = {
+            "movies": [
+                {
+                    "id": "m1",
+                    "title": "Berlin Movie",
+                    "genres": [],
+                },
+            ],
+        }
+
+        response = internal_client.get("/api/v1/internal/movies?location=Berlin")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["id"] == "m1"
+        assert data[0]["title"] == "Berlin Movie"
+
     def test_get_movie_returns_cached_movie(self, internal_client: TestClient):
         response = internal_client.get("/api/v1/internal/movies/99")
 
@@ -119,6 +180,33 @@ class TestInternalCinemas:
         data = response.json()
         assert len(data) == 1
         assert data[0]["id"] == "1"
+
+    def test_list_cinemas_falls_back_to_live_on_location_cache_miss(
+        self,
+        internal_client: TestClient,
+        mock_graphql_client: AsyncMock,
+    ):
+        cache = internal_client.app.state.kinoheld_cache
+        cache._cinemas = [
+            Cinema(id="2", name="Munich Kino", city=CitySummary(name="Munich")),
+        ]
+        mock_graphql_client.execute.return_value = {
+            "cinemas": [
+                {
+                    "id": "1",
+                    "name": "Berlin Kino",
+                    "city": {"id": "1149", "name": "Berlin", "urlSlug": "berlin"},
+                },
+            ],
+        }
+
+        response = internal_client.get("/api/v1/internal/cinemas?location=Berlin")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data) == 1
+        assert data[0]["id"] == "1"
+        assert data[0]["name"] == "Berlin Kino"
 
 
 class TestInternalCities:

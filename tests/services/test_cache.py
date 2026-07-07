@@ -148,6 +148,22 @@ class TestSearchShows:
 
 
 @pytest.mark.asyncio
+class TestCacheHelpers:
+    async def test_add_cinemas_merges_without_duplicates(self, cache: KinoheldCache):
+        cache._cinemas = [Cinema(id="1", name="Kino")]
+        await cache.add_cinemas([Cinema(id="1", name="Kino"), Cinema(id="2", name="Kino 2")])
+
+        assert len(cache._cinemas) == 2
+        assert {c.id for c in cache._cinemas} == {"1", "2"}
+
+    async def test_has_any_shows(self, cache: KinoheldCache):
+        cache._shows = {"c1::2024-06-15": [Show(id="s1", name="Show")]}
+
+        assert await cache.has_any_shows("c1") is True
+        assert await cache.has_any_shows("c2") is False
+
+
+@pytest.mark.asyncio
 class TestGetShow:
     async def test_raises_when_not_found(self, cache: KinoheldCache):
         with pytest.raises(KinoheldNotFoundError):
