@@ -58,9 +58,9 @@ class Settings(BaseSettings):
         description="Max movies to fetch per cache refresh",
     )
     kinoheld_sync_cinema_limit: int = Field(
-        default=100,
+        default=1000,
         ge=1,
-        le=500,
+        le=1000,
         description="Max cinemas to fetch per cache refresh",
     )
 

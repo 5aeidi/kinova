@@ -323,8 +323,8 @@ Search cinemas by city, name, or free-text query.
 | `search`       | string  | No       | —       | Free-text cinema/city search                     |
 | `location`     | string  | No       | —       | City name to centre the search                   |
 | `distance`     | integer | No       | —       | Search radius in kilometres (`1`–`100`)          |
-| `limit`        | integer | No       | `20`    | Maximum number of results (`1`–`100`)            |
-| `onlyBookable` | boolean | No       | —       | Only return cinemas that support booking         |
+| `limit`        | integer | No       | `1000`  | Maximum number of results (`1`–`1000`)           |
+| `onlyBookable` | boolean | No       | `false` | Only return cinemas that support booking         |
 | `isOpenAir`    | boolean | No       | —       | Filter by open-air cinemas                       |
 | `isDriveIn`    | boolean | No       | —       | Filter by drive-in cinemas                       |
 

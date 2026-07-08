@@ -112,14 +112,11 @@ class KinoheldCache:
         distance = params.distance
         limit = params.limit
 
-        if location and distance is not None:
+        if location:
+            # Match Kinoheld's default 50 km radius when no explicit distance is given.
+            if distance is None:
+                distance = 50
             cinemas = self._filter_by_location(cinemas, location, distance)
-        elif location:
-            cinemas = [
-                cinema
-                for cinema in cinemas
-                if _matches(cinema.city.name if cinema.city else None, location)
-            ]
 
         results = [
             cinema
@@ -307,7 +304,12 @@ class KinoheldCache:
                         break
 
         if centre is None or centre.latitude is None or centre.longitude is None:
-            return []
+            # No coordinate centre available; fall back to a city-name substring match.
+            return [
+                cinema
+                for cinema in cinemas
+                if _matches(cinema.city.name if cinema.city else None, location_name)
+            ]
 
         return [
             cinema

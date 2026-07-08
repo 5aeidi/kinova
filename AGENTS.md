@@ -123,7 +123,7 @@ Key variables (all have defaults):
 | `KINOHELD_SYNC_CINEMA_IDS` | `[]` | Cinema IDs to pre-fetch shows for |
 | `KINOHELD_SYNC_SHOW_DAYS` | `7` | Days of shows to pre-fetch |
 | `KINOHELD_SYNC_MOVIE_LIMIT` | `100` | Movies fetched per refresh |
-| `KINOHELD_SYNC_CINEMA_LIMIT` | `100` | Cinemas fetched per refresh |
+| `KINOHELD_SYNC_CINEMA_LIMIT` | `1000` | Cinemas fetched per refresh |
 | `LLM_BASE_URL` | `https://api.groq.com/openai/v1` | OpenAI-compatible base URL |
 | `LLM_API_KEY` | `None` | LLM provider API key |
 | `LLM_MODEL` | `llama-3.3-70b-versatile` | Model name |

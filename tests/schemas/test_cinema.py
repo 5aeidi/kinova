@@ -50,4 +50,9 @@ class TestCinemaSearchParams:
         dumped = params.model_dump(mode="json", by_alias=True)
         assert dumped["onlyBookable"] is True
         assert dumped["isDriveIn"] is True
-        assert dumped["limit"] == 20
+        assert dumped["limit"] == 1000
+
+    def test_defaults_to_complete_dataset(self):
+        params = CinemaSearchParams()
+        assert params.limit == 1000
+        assert params.only_bookable is False

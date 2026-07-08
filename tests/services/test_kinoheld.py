@@ -37,7 +37,19 @@ class TestSearchCinemas:
         assert result[0].thumbnail is not None
         mock_graphql_client.execute.assert_awaited_once()
         call_variables = mock_graphql_client.execute.call_args.kwargs["variables"]
-        assert call_variables == {"limit": 1}
+        assert call_variables == {"limit": 1, "onlyBookable": False}
+
+    async def test_defaults_request_complete_cinema_dataset(
+        self,
+        kinoheld_service: KinoheldService,
+        mock_graphql_client: AsyncMock,
+    ):
+        mock_graphql_client.execute.return_value = {"cinemas": []}
+
+        await kinoheld_service.search_cinemas(CinemaSearchParams())
+
+        call_variables = mock_graphql_client.execute.call_args.kwargs["variables"]
+        assert call_variables == {"limit": 1000, "onlyBookable": False}
 
 
 @pytest.mark.asyncio

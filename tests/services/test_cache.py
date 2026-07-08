@@ -76,8 +76,21 @@ class TestSearchCinemas:
         assert [c.id for c in results] == ["1"]
 
     async def test_filters_by_location_without_distance(self, cache: KinoheldCache):
-        berlin = Cinema(id="1", name="Berlin Kino", city=CitySummary(name="Berlin"))
-        munich = Cinema(id="2", name="Munich Kino", city=CitySummary(name="Munich"))
+        berlin = Cinema(
+            id="1",
+            name="Berlin Kino",
+            city=CitySummary(name="Berlin"),
+            coordinates=Geo(latitude=52.52, longitude=13.405),
+        )
+        munich = Cinema(
+            id="2",
+            name="Munich Kino",
+            city=CitySummary(name="Munich"),
+            coordinates=Geo(latitude=48.135, longitude=11.582),
+        )
+        cache._cities = [
+            City(id="1", name="Berlin", coordinates=Geo(latitude=52.52, longitude=13.405)),
+        ]
         cache._cinemas = [berlin, munich]
 
         results = await cache.search_cinemas(
@@ -85,6 +98,32 @@ class TestSearchCinemas:
         )
 
         assert [c.id for c in results] == ["1"]
+
+    async def test_filters_by_location_uses_default_radius(self, cache: KinoheldCache):
+        centre = City(id="1", name="Berlin", coordinates=Geo(latitude=52.52, longitude=13.405))
+        berlin_cinema = Cinema(
+            id="1",
+            name="Berlin Kino",
+            coordinates=Geo(latitude=52.53, longitude=13.41),
+        )
+        nearby_cinema = Cinema(
+            id="2",
+            name="Potsdam Kino",
+            coordinates=Geo(latitude=52.4, longitude=13.07),
+        )
+        far_cinema = Cinema(
+            id="3",
+            name="Munich Kino",
+            coordinates=Geo(latitude=48.135, longitude=11.582),
+        )
+        cache._cities = [centre]
+        cache._cinemas = [berlin_cinema, nearby_cinema, far_cinema]
+
+        results = await cache.search_cinemas(
+            CinemaSearchParams(location="Berlin", limit=10),
+        )
+
+        assert {c.id for c in results} == {"1", "2"}
 
 
 @pytest.mark.asyncio

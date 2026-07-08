@@ -1,6 +1,7 @@
 """Shared pytest fixtures."""
 
 from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
 import pytest
@@ -8,6 +9,17 @@ import pytest
 from app.main import create_application
 from app.services.graphql_client import GraphQLClient
 from app.services.kinoheld import KinoheldService
+
+
+@pytest.fixture(autouse=True)
+def _disable_lifespan_network_calls(monkeypatch):
+    """Unit tests should not depend on the real Kinoheld network."""
+
+    @asynccontextmanager
+    async def noop_lifespan(app):
+        yield
+
+    monkeypatch.setattr("app.main.lifespan", noop_lifespan)
 
 
 @pytest.fixture
