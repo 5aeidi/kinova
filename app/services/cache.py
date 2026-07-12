@@ -227,6 +227,11 @@ class KinoheldCache:
                         return show
         raise KinoheldNotFoundError(f"Show {show_id} not found")
 
+    async def list_all_shows(self) -> list[Show]:
+        """Return all cached shows across cinemas and dates."""
+        async with self._lock:
+            return [show for shows in self._shows.values() for show in shows]
+
     async def cache_shows_for_cinema(
         self,
         service: KinoheldService,

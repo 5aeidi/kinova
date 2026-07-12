@@ -6,7 +6,7 @@
 
 **Kinova** is a small, production-ready **FastAPI** wrapper around the **Kinoheld GraphQL API**.
 
-It exposes clean REST routes for cinemas, movies, shows, cities, and genres while handling GraphQL introspection, error mapping, connection pooling, and Pydantic validation for you.
+It exposes clean REST routes for cinemas, movies, shows, cities, and genres while handling GraphQL introspection, error mapping, connection pooling, and Pydantic validation for you. It also includes source-specific Cinetixx routes and cache-backed internal Cinetixx routes for cinemas where you know the Cinetixx `mandatorId`.
 
 ## Why this exists
 
@@ -53,6 +53,14 @@ All routes are prefixed with `/api/v1`.
 | GET | `/cities` | Search cities |
 | GET | `/cities/me` | City inferred from request IP |
 | GET | `/genres` | List genres |
+| GET | `/cinetixx/show-info` | Fetch Cinetixx legacy showtime data by `mandatorId` |
+| GET | `/cinetixx/cinemas` | List Cinetixx cinemas derived from program data |
+| GET | `/cinetixx/movies` | List Cinetixx movies/events derived from program data |
+| GET | `/cinetixx/shows` | List Cinetixx shows derived from program data |
+| GET | `/cinetixx/cities` | List Cinetixx cities derived from program data |
+| GET | `/cinetixx/genres` | List Cinetixx genres/categories derived from program data |
+| GET | `/internal/cinetixx/*` | Cache-backed Cinetixx resource routes |
+| GET | `/internal/unified/*` | Cache-backed unified resources with Kinoheld-shaped fields plus `source` metadata |
 
 ### Example requests
 
@@ -68,6 +76,17 @@ curl "http://localhost:8000/api/v1/shows?cinemaId=254&date=2026-06-14"
 
 # List genres
 curl "http://localhost:8000/api/v1/genres"
+
+# Cinetixx legacy showtime data for a known mandatorId
+curl "http://localhost:8000/api/v1/cinetixx/show-info?mandatorId=1234"
+
+# Normalized Cinetixx shows and internal cached shows
+curl "http://localhost:8000/api/v1/cinetixx/shows?mandatorId=1234"
+curl "http://localhost:8000/api/v1/internal/cinetixx/shows?mandatorId=1234"
+
+# Unified cached movies across providers
+curl "http://localhost:8000/api/v1/internal/unified/movies?mandatorId=1234"
+curl "http://localhost:8000/api/v1/internal/unified/movies?source=cinetixx&mandatorId=1234"
 ```
 
 > **Frontend integration:** see [`API.md`](./API.md) for the full frontend guide, including request/response schemas and copy-paste `curl` examples.
@@ -159,6 +178,12 @@ This project exposes the most useful read-only queries first. You can extend `ap
 | `KINOHELD_REQUEST_TIMEOUT` | `30.0` | HTTP timeout |
 | `KINOHELD_POOL_LIMITS` | `10` | Connection pool size |
 | `KINOHELD_AFFILIATE_KEY` | `None` | Optional affiliate key |
+| `CINETIXX_SHOW_INFO_URL` | `https://api.cinetixx.de/Services/CinetixxService.asmx/GetShowInfoV6` | Cinetixx legacy showtime endpoint |
+| `CINETIXX_REQUEST_TIMEOUT` | `30.0` | Cinetixx HTTP timeout |
+| `CINETIXX_POOL_LIMITS` | `10` | Cinetixx connection pool size |
+| `CINETIXX_SYNC_INTERVAL_SECONDS` | `600` | Cinetixx cache refresh interval |
+| `CINETIXX_SYNC_MANDATOR_IDS` | `[]` | Mandator IDs to pre-fetch into the internal Cinetixx cache |
+| `CINETIXX_SYNC_SHOW_DAYS` | `7` | Default number of Cinetixx show days returned by date filters |
 
 ## Running tests
 

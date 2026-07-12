@@ -1,15 +1,12 @@
-"""Background periodic sync task for the Kinoheld cache."""
+"""Background periodic sync task for source caches."""
 
 import asyncio
 import logging
 
-from app.services.cache import KinoheldCache
-from app.services.kinoheld import KinoheldService
-
 logger = logging.getLogger(__name__)
 
 
-async def run_periodic_sync(cache: KinoheldCache, service: KinoheldService, interval: int) -> None:
+async def run_periodic_sync(cache, service, interval: int) -> None:
     """Refresh ``cache`` every ``interval`` seconds until cancelled.
 
     The first refresh is expected to be triggered by the application lifespan

@@ -32,6 +32,20 @@ class KinoheldNotFoundError(KinovaError):
         super().__init__(message, status.HTTP_404_NOT_FOUND)
 
 
+class CinetixxAPIError(KinovaError):
+    """Raised when the upstream Cinetixx API returns an error."""
+
+    def __init__(self, message: str):
+        super().__init__(message, status.HTTP_502_BAD_GATEWAY)
+
+
+class CinetixxNotFoundError(KinovaError):
+    """Raised when a requested Cinetixx resource is not found."""
+
+    def __init__(self, message: str = "Cinetixx resource not found"):
+        super().__init__(message, status.HTTP_404_NOT_FOUND)
+
+
 def _apply_cors_headers(request: Request, response: JSONResponse) -> JSONResponse:
     """Mirror CORS headers on error responses.
 

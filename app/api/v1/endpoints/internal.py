@@ -3,15 +3,36 @@
 import datetime as dt
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Path
+from fastapi import APIRouter, Depends, Path, Query
 
-from app.api.deps import get_kinoheld_cache, get_kinoheld_cached_service, get_kinoheld_service
+from app.api.deps import (
+    get_cinetixx_cache,
+    get_cinetixx_cached_service,
+    get_kinoheld_cache,
+    get_kinoheld_cached_service,
+    get_kinoheld_service,
+)
 from app.core.config import settings
 from app.schemas.cinema import Cinema, CinemaSearchParams
+from app.schemas.cinetixx import (
+    CinetixxCinema,
+    CinetixxCinemaSearchParams,
+    CinetixxCity,
+    CinetixxCitySearchParams,
+    CinetixxGenre,
+    CinetixxGenreSearchParams,
+    CinetixxMovie,
+    CinetixxMovieSearchParams,
+    CinetixxShow,
+    CinetixxShowInfo,
+    CinetixxShowSearchParams,
+)
 from app.schemas.city import City, CitySearchParams
 from app.schemas.movie import Genre, Movie, MovieSearchParams
 from app.schemas.show import Show, ShowSearchParams
 from app.services.cache import KinoheldCache
+from app.services.cinetixx import CinetixxService
+from app.services.cinetixx_cache import CinetixxCache
 from app.services.kinoheld import KinoheldService
 
 router = APIRouter(prefix="/internal", tags=["internal"])
@@ -19,6 +40,24 @@ router = APIRouter(prefix="/internal", tags=["internal"])
 CacheDep = Annotated[KinoheldCache, Depends(get_kinoheld_cache)]
 CachedServiceDep = Annotated[KinoheldService, Depends(get_kinoheld_cached_service)]
 LiveServiceDep = Annotated[KinoheldService, Depends(get_kinoheld_service)]
+CinetixxCacheDep = Annotated[CinetixxCache, Depends(get_cinetixx_cache)]
+CinetixxCachedServiceDep = Annotated[CinetixxService, Depends(get_cinetixx_cached_service)]
+
+
+async def _ensure_cinetixx_cached(
+    cache: CinetixxCache,
+    service: CinetixxService,
+    mandator_id: int | None,
+) -> None:
+    """Populate Cinetixx cache when a request needs data that is not cached yet."""
+    if mandator_id is not None:
+        if not await cache.has_mandator(mandator_id):
+            await cache.cache_mandator(service, mandator_id)
+        return
+
+    snapshot = cache.snapshot()
+    if not snapshot["mandators"] and settings.cinetixx_sync_mandator_ids:
+        await cache.refresh(service)
 
 
 # ------------------------------------------------------------------
@@ -184,3 +223,164 @@ async def get_city_internal(
 async def list_genres_internal(cache: CacheDep) -> list[Genre]:
     """List all cached movie genres."""
     return await cache.list_genres()
+
+
+# ------------------------------------------------------------------
+# Cinetixx cache-backed endpoints
+# ------------------------------------------------------------------
+@router.get("/cinetixx/health")
+async def cinetixx_health_check(cache: CinetixxCacheDep) -> dict:
+    """Health probe that reports Cinetixx cache status."""
+    snapshot = cache.snapshot()
+    return {
+        "status": "ok",
+        "source": "cinetixx-cache",
+        "last_refresh": snapshot["last_refresh"],
+        "cached_mandators": snapshot["mandators"],
+        "cached_cinemas": snapshot["cinemas"],
+        "cached_movies": snapshot["movies"],
+        "cached_shows": snapshot["shows"],
+        "cached_cities": snapshot["cities"],
+        "cached_genres": snapshot["genres"],
+    }
+
+
+@router.get("/cinetixx/show-info", response_model=CinetixxShowInfo)
+async def get_cinetixx_show_info_internal(
+    cache: CinetixxCacheDep,
+    service: CinetixxCachedServiceDep,
+    mandator_id: Annotated[int, Query(..., alias="mandatorId", gt=0)],
+) -> CinetixxShowInfo:
+    """Fetch cached raw Cinetixx show-info, populating it on demand."""
+    await _ensure_cinetixx_cached(cache, service, mandator_id)
+    return await cache.get_show_info(mandator_id)
+
+
+@router.get("/cinetixx/cinemas", response_model=list[CinetixxCinema])
+async def list_cinetixx_cinemas_internal(
+    cache: CinetixxCacheDep,
+    service: CinetixxCachedServiceDep,
+    mandator_id: Annotated[int | None, Query(alias="mandatorId", gt=0)] = None,
+    search: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+) -> list[CinetixxCinema]:
+    """Search cached Cinetixx cinemas."""
+    await _ensure_cinetixx_cached(cache, service, mandator_id)
+    params = CinetixxCinemaSearchParams(mandator_id=mandator_id, search=search, limit=limit)
+    return await cache.search_cinemas(params)
+
+
+@router.get("/cinetixx/cinemas/{cinema_id}", response_model=CinetixxCinema)
+async def get_cinetixx_cinema_internal(
+    cache: CinetixxCacheDep,
+    service: CinetixxCachedServiceDep,
+    cinema_id: Annotated[str, Path(..., description="Cinetixx cinema ID")],
+    mandator_id: Annotated[int | None, Query(alias="mandatorId", gt=0)] = None,
+) -> CinetixxCinema:
+    """Fetch a cached Cinetixx cinema by ID."""
+    await _ensure_cinetixx_cached(cache, service, mandator_id)
+    return await cache.get_cinema(cinema_id, mandator_id)
+
+
+@router.get("/cinetixx/movies", response_model=list[CinetixxMovie])
+async def list_cinetixx_movies_internal(
+    cache: CinetixxCacheDep,
+    service: CinetixxCachedServiceDep,
+    mandator_id: Annotated[int | None, Query(alias="mandatorId", gt=0)] = None,
+    search: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+) -> list[CinetixxMovie]:
+    """Search cached Cinetixx movies/events."""
+    await _ensure_cinetixx_cached(cache, service, mandator_id)
+    params = CinetixxMovieSearchParams(mandator_id=mandator_id, search=search, limit=limit)
+    return await cache.search_movies(params)
+
+
+@router.get("/cinetixx/movies/{movie_id}", response_model=CinetixxMovie)
+async def get_cinetixx_movie_internal(
+    cache: CinetixxCacheDep,
+    service: CinetixxCachedServiceDep,
+    movie_id: Annotated[str, Path(..., description="Cinetixx movie/event ID")],
+    mandator_id: Annotated[int | None, Query(alias="mandatorId", gt=0)] = None,
+) -> CinetixxMovie:
+    """Fetch a cached Cinetixx movie/event by ID."""
+    await _ensure_cinetixx_cached(cache, service, mandator_id)
+    return await cache.get_movie(movie_id, mandator_id)
+
+
+@router.get("/cinetixx/shows", response_model=list[CinetixxShow])
+async def list_cinetixx_shows_internal(
+    cache: CinetixxCacheDep,
+    service: CinetixxCachedServiceDep,
+    mandator_id: Annotated[int | None, Query(alias="mandatorId", gt=0)] = None,
+    date: Annotated[dt.date | None, Query(description="Start date in YYYY-MM-DD format")] = None,
+    days: Annotated[int | None, Query(ge=1, le=30)] = None,
+    movie_id: Annotated[str | None, Query(alias="movieId")] = None,
+    cinema_id: Annotated[str | None, Query(alias="cinemaId")] = None,
+    search: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+) -> list[CinetixxShow]:
+    """Search cached Cinetixx shows."""
+    await _ensure_cinetixx_cached(cache, service, mandator_id)
+    params = CinetixxShowSearchParams(
+        mandator_id=mandator_id,
+        date=date,
+        days=days,
+        movie_id=movie_id,
+        cinema_id=cinema_id,
+        search=search,
+        limit=limit,
+    )
+    return await cache.search_shows(params)
+
+
+@router.get("/cinetixx/shows/{show_id}", response_model=CinetixxShow)
+async def get_cinetixx_show_internal(
+    cache: CinetixxCacheDep,
+    service: CinetixxCachedServiceDep,
+    show_id: Annotated[str, Path(..., description="Cinetixx show ID")],
+    mandator_id: Annotated[int | None, Query(alias="mandatorId", gt=0)] = None,
+) -> CinetixxShow:
+    """Fetch a cached Cinetixx show by ID."""
+    await _ensure_cinetixx_cached(cache, service, mandator_id)
+    return await cache.get_show(show_id, mandator_id)
+
+
+@router.get("/cinetixx/cities", response_model=list[CinetixxCity])
+async def list_cinetixx_cities_internal(
+    cache: CinetixxCacheDep,
+    service: CinetixxCachedServiceDep,
+    mandator_id: Annotated[int | None, Query(alias="mandatorId", gt=0)] = None,
+    search: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+) -> list[CinetixxCity]:
+    """Search cached Cinetixx cities."""
+    await _ensure_cinetixx_cached(cache, service, mandator_id)
+    params = CinetixxCitySearchParams(mandator_id=mandator_id, search=search, limit=limit)
+    return await cache.search_cities(params)
+
+
+@router.get("/cinetixx/cities/{city_id}", response_model=CinetixxCity)
+async def get_cinetixx_city_internal(
+    cache: CinetixxCacheDep,
+    service: CinetixxCachedServiceDep,
+    city_id: Annotated[str, Path(..., description="Cinetixx city ID or name")],
+    mandator_id: Annotated[int | None, Query(alias="mandatorId", gt=0)] = None,
+) -> CinetixxCity:
+    """Fetch a cached Cinetixx city by ID or name."""
+    await _ensure_cinetixx_cached(cache, service, mandator_id)
+    return await cache.get_city(city_id, mandator_id)
+
+
+@router.get("/cinetixx/genres", response_model=list[CinetixxGenre])
+async def list_cinetixx_genres_internal(
+    cache: CinetixxCacheDep,
+    service: CinetixxCachedServiceDep,
+    mandator_id: Annotated[int | None, Query(alias="mandatorId", gt=0)] = None,
+    search: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+) -> list[CinetixxGenre]:
+    """List cached Cinetixx genres/categories."""
+    await _ensure_cinetixx_cached(cache, service, mandator_id)
+    params = CinetixxGenreSearchParams(mandator_id=mandator_id, search=search, limit=limit)
+    return await cache.list_genres(params)

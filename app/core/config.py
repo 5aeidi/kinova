@@ -36,6 +36,34 @@ class Settings(BaseSettings):
         description="Optional affiliate key for commissionable links",
     )
 
+    # Cinetixx legacy showtime endpoint
+    cinetixx_show_info_url: str = Field(
+        default="https://api.cinetixx.de/Services/CinetixxService.asmx/GetShowInfoV6",
+        description="Cinetixx legacy showtime endpoint",
+    )
+    cinetixx_request_timeout: float = Field(
+        default=30.0,
+        description="Cinetixx HTTP request timeout in seconds",
+    )
+    cinetixx_pool_limits: int = Field(
+        default=10,
+        description="Max keepalive connections in the Cinetixx HTTP connection pool",
+    )
+    cinetixx_sync_interval_seconds: int = Field(
+        default=600,
+        description="How often to refresh the local Cinetixx cache",
+    )
+    cinetixx_sync_mandator_ids: list[int] = Field(
+        default_factory=list,
+        description="Cinetixx mandator IDs to pre-fetch during cache refresh",
+    )
+    cinetixx_sync_show_days: int = Field(
+        default=7,
+        ge=1,
+        le=30,
+        description="Default number of Cinetixx show days to return when filtering dates",
+    )
+
     # Local cache / sync settings
     kinoheld_sync_interval_seconds: int = Field(
         default=600,

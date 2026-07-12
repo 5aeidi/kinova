@@ -22,6 +22,7 @@ This document is the single source of truth for frontend developers integrating 
   - [Movies](#movies)
   - [Shows](#shows)
   - [Genres](#genres)
+  - [Cinetixx](#cinetixx)
 - [Frontend integration tips](#frontend-integration-tips)
 - [Generating TypeScript types](#generating-typescript-types)
 - [Quick command reference](#quick-command-reference)
@@ -37,7 +38,7 @@ All routes are prefixed with `/api/v1`.
 | Local dev   | `http://localhost:8000/api/v1` |
 | Production  | Configured per deployment (e.g. `https://api.example.com/api/v1`) |
 
-The API is read-only and wraps the upstream [Kinoheld](https://www.kinoheld.de/) GraphQL endpoint.
+The API is read-only and primarily wraps the upstream [Kinoheld](https://www.kinoheld.de/) GraphQL endpoint. Source-specific Cinetixx routes are namespaced under `/cinetixx`.
 
 ---
 
@@ -55,6 +56,8 @@ The API is read-only and wraps the upstream [Kinoheld](https://www.kinoheld.de/)
 ## Authentication
 
 None of the current routes require authentication. If auth is added in the future, this section will be updated and the relevant endpoints will return `401 Unauthorized` when credentials are missing or invalid.
+
+The source-specific `GET /cinetixx/show-info` route uses Cinetixx's legacy showtime endpoint and does not accept credentials. Cinetixx's current public REST API documentation describes a separate token-authenticated API using a `Cinetixx-AccessToken` header; Kinova does not wrap those official REST routes yet.
 
 ---
 
@@ -166,6 +169,13 @@ When Kinoheld returns a GraphQL-level error (e.g. an invalid enum value), the re
 | `GET /shows` | `200` | `422` | — | `500` |
 | `GET /shows/{show_id}` | `200` | `422` | `404` | `500` |
 | `GET /genres` | `200` | — | — | `500` |
+| `GET /cinetixx/show-info` | `200` | `422` | — | `500` |
+| `GET /cinetixx/{resource}` | `200` | `422` | — | `500` |
+| `GET /cinetixx/{resource}/{id}` | `200` | `422` | `404` | `500` |
+| `GET /internal/cinetixx/{resource}` | `200` | `422` | — | `500` |
+| `GET /internal/cinetixx/{resource}/{id}` | `200` | `422` | `404` | `500` |
+| `GET /internal/unified/{resource}` | `200` | `422` | — | `500` |
+| `GET /internal/unified/{resource}/{id}` | `200` | `422` | `404` | `500` |
 
 > **Empty list vs. 404:** Search endpoints (`/cinemas`, `/movies`, `/shows`, `/cities`) return `200 OK` with an empty array `[]` when no results match. A `404` is only returned for single-resource lookups (`/{id}`) or `/cities/me` when geolocation fails.
 
@@ -843,6 +853,135 @@ curl "http://localhost:8000/api/v1/genres"
 
 ---
 
+## Cinetixx
+
+### `GET /cinetixx/show-info`
+
+Fetch source-specific Cinetixx legacy showtime data for a known `mandatorId`.
+
+The Cinetixx `mandatorId` is not guaranteed to match the `kino` value used by `https://booking.cinetixx.de/frontend/?kino=...`. Store the correct `mandatorId` alongside your internal cinema record when you have confirmed it.
+
+#### Query parameters
+
+| Parameter    | Type    | Required | Default | Description                  |
+|--------------|---------|----------|---------|------------------------------|
+| `mandatorId` | integer | Yes      | —       | Cinetixx legacy mandator ID  |
+
+#### Response model
+
+| Field         | Type     | Nullable | Description                             |
+|---------------|----------|----------|-----------------------------------------|
+| `source`      | string   | No       | Always `"cinetixx"`                     |
+| `endpoint`    | string   | No       | Always `"GetShowInfoV6"`                |
+| `mandatorId`  | integer  | No       | The requested Cinetixx mandator ID      |
+| `contentType` | string   | Yes      | Upstream response content type          |
+| `data`        | any JSON | Yes      | Parsed JSON/XML, or plain text fallback |
+
+#### Example request
+
+```bash
+curl "http://localhost:8000/api/v1/cinetixx/show-info?mandatorId=1234"
+```
+
+#### Example response — `200 OK`
+
+```json
+{
+  "source": "cinetixx",
+  "endpoint": "GetShowInfoV6",
+  "mandatorId": 1234,
+  "contentType": "application/json",
+  "data": {
+    "shows": []
+  }
+}
+```
+
+### Normalized Cinetixx Resource Routes
+
+These routes derive Kinoheld-like read-only resources from the legacy show-info/program payload. They only contain fields Cinetixx exposes in the payload for the requested `mandatorId`; use `/cinetixx/show-info` if you need the unmodified source body.
+
+If `mandatorId` is omitted, the live routes use configured `CINETIXX_SYNC_MANDATOR_IDS`. If that list is empty, they return an empty list.
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| GET | `/cinetixx/cinemas` | Cinemas derived from program rows |
+| GET | `/cinetixx/cinemas/{cinema_id}` | One derived Cinetixx cinema |
+| GET | `/cinetixx/movies` | Movies/events derived from program rows |
+| GET | `/cinetixx/movies/{movie_id}` | One derived Cinetixx movie/event |
+| GET | `/cinetixx/shows` | Shows/screenings derived from program rows |
+| GET | `/cinetixx/shows/{show_id}` | One derived Cinetixx show |
+| GET | `/cinetixx/cities` | Cities derived from program rows |
+| GET | `/cinetixx/genres` | Genres/categories derived from program rows |
+
+Common query parameters:
+
+| Parameter | Routes | Description |
+|-----------|--------|-------------|
+| `mandatorId` | all | Optional Cinetixx mandator ID. Required unless sync IDs are configured. |
+| `search` | list routes | Free-text filter where supported |
+| `limit` | list routes | Max results, default `100`, max `1000` |
+| `date`, `days` | `/cinetixx/shows` | Date window for shows |
+| `movieId` | `/cinetixx/shows` | Filter shows by movie/event ID |
+| `cinemaId` | `/cinetixx/shows` | Filter shows by Cinetixx cinema ID |
+
+Example:
+
+```bash
+curl "http://localhost:8000/api/v1/cinetixx/shows?mandatorId=1234&date=2026-07-13&days=7"
+curl "http://localhost:8000/api/v1/cinetixx/movies?mandatorId=1234&search=dune"
+```
+
+### Internal Cinetixx Cache Routes
+
+Internal cache-backed Cinetixx routes live under `/internal/cinetixx/*` and mirror the normalized public Cinetixx routes:
+
+```bash
+curl "http://localhost:8000/api/v1/internal/cinetixx/health"
+curl "http://localhost:8000/api/v1/internal/cinetixx/shows?mandatorId=1234"
+curl "http://localhost:8000/api/v1/internal/cinetixx/movies?mandatorId=1234"
+```
+
+The cache refreshes periodically from `CINETIXX_SYNC_MANDATOR_IDS`. If an internal request includes a `mandatorId` that is not cached yet, Kinova fetches and stores it on demand.
+
+## Unified Internal Layer
+
+Unified cache-backed routes live under `/internal/unified/*`. They combine cached provider data into the same Kinoheld-shaped response models and add a `source` tag plus `sourceId` metadata to every item.
+
+The unified `id` is source-prefixed, for example `kinoheld:123` or `cinetixx:123`. The original upstream ID is also returned as `sourceId`.
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| GET | `/internal/unified/cinemas` | Unified cached cinemas |
+| GET | `/internal/unified/cinemas/{cinema_id}` | One unified cinema |
+| GET | `/internal/unified/movies` | Unified cached movies/events |
+| GET | `/internal/unified/movies/{movie_id}` | One unified movie/event |
+| GET | `/internal/unified/shows` | Unified cached shows |
+| GET | `/internal/unified/shows/{show_id}` | One unified show |
+| GET | `/internal/unified/cities` | Unified cached cities |
+| GET | `/internal/unified/cities/{city_id}` | One unified city |
+| GET | `/internal/unified/genres` | Unified cached genres/categories |
+
+Common query parameters:
+
+| Parameter | Description |
+|-----------|-------------|
+| `source` | Optional source filter. Currently `kinoheld`, `cinetixx`, or omitted/`all`. |
+| `mandatorId` | Optional Cinetixx mandator ID. Used for Cinetixx on-demand cache fill. |
+| `search` | Free-text search where supported by the resource. |
+| `limit` | Max results, default `100`, max `1000`. |
+| `date`, `days`, `movieId`, `cinemaId` | Show filters for `/internal/unified/shows`. |
+
+Example:
+
+```bash
+curl "http://localhost:8000/api/v1/internal/unified/movies?mandatorId=1234"
+curl "http://localhost:8000/api/v1/internal/unified/shows?source=cinetixx&mandatorId=1234"
+curl "http://localhost:8000/api/v1/internal/unified/movies/cinetixx:456?mandatorId=1234"
+```
+
+---
+
 ## Frontend integration tips
 
 ### Handling nullable fields
@@ -924,6 +1063,12 @@ curl "http://localhost:8000/api/v1/shows/126112767"
 
 # Genres
 curl "http://localhost:8000/api/v1/genres"
+
+# Cinetixx source-specific showtime data
+curl "http://localhost:8000/api/v1/cinetixx/show-info?mandatorId=1234"
+curl "http://localhost:8000/api/v1/cinetixx/shows?mandatorId=1234"
+curl "http://localhost:8000/api/v1/internal/cinetixx/shows?mandatorId=1234"
+curl "http://localhost:8000/api/v1/internal/unified/movies?mandatorId=1234"
 ```
 
 ---
