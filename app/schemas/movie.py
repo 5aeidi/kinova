@@ -61,7 +61,7 @@ class MovieSearchParams(BaseModel):
     search: str | None = Field(default=None, description="Free-text movie title search")
     location: str | None = Field(default=None, description="City name to restrict results")
     distance: int | None = Field(default=None, ge=1, le=100)
-    limit: int = Field(default=20, ge=1, le=100)
+    limit: int = Field(default=20, ge=1)
     playing: str | None = Field(
         default=None,
         description="Filter by playing status (e.g. NOW, SOON)",

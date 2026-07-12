@@ -37,6 +37,11 @@ class TestMovieSearchParams:
         assert params.search == "Dune"
         assert params.limit == 5
 
+    def test_accepts_limit_above_100(self):
+        params = MovieSearchParams(limit=250)
+
+        assert params.limit == 250
+
     def test_json_dump_uses_aliases(self):
         params = MovieSearchParams(search="Dune", location="Berlin")
         dumped = params.model_dump(mode="json", by_alias=True)

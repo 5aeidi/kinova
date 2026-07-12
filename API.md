@@ -469,7 +469,7 @@ Search movies by title or playing location.
 | `search`   | string  | No       | —       | Free-text movie title search                     |
 | `location` | string  | No       | —       | City name to restrict results                    |
 | `distance` | integer | No       | —       | Search radius in kilometres (`1`–`100`)          |
-| `limit`    | integer | No       | `20`    | Maximum number of results (`1`–`100`)            |
+| `limit`    | integer | No       | `20`    | Maximum number of results (`>= 1`)               |
 | `playing`  | string  | No       | —       | Filter by playing status: `NOW`, `FUTURE`, or `UPCOMING` |
 
 #### Response model

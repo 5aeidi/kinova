@@ -58,6 +58,15 @@ class TestInternalMovies:
         assert data[0]["id"] == "99"
         assert data[0]["title"] == "Cached Movie"
 
+    def test_list_movies_allows_limit_above_100(self, internal_client: TestClient):
+        cache = internal_client.app.state.kinoheld_cache
+        cache._movies = [Movie(id=str(index), title=f"Movie {index}") for index in range(150)]
+
+        response = internal_client.get("/api/v1/internal/movies?limit=120")
+
+        assert response.status_code == 200
+        assert len(response.json()) == 120
+
     def test_list_movies_filters_by_location(self, internal_client: TestClient):
         cache = internal_client.app.state.kinoheld_cache
         berlin_movie = Movie(id="99", title="Berlin Movie")

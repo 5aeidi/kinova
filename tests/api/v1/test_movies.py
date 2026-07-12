@@ -45,6 +45,15 @@ class TestListMovies:
         assert data[0]["id"] == "99"
         assert data[0]["thumb"]["url"] == "https://example.com/t.jpg"
 
+    def test_allows_limit_above_100(self, client: TestClient, mock_graphql_client: AsyncMock):
+        mock_graphql_client.execute.return_value = {"movies": []}
+
+        response = client.get("/api/v1/movies?location=Berlin&playing=NOW&limit=250")
+
+        assert response.status_code == 200
+        call_variables = mock_graphql_client.execute.call_args.kwargs["variables"]
+        assert call_variables["limit"] == 250
+
 
 class TestGetMovie:
     def test_not_found(self, client: TestClient, mock_graphql_client: AsyncMock):
