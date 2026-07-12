@@ -9,7 +9,7 @@ import pytest
 
 from app.main import create_application
 from app.services.cinetixx import CinetixxService
-from tests.services.test_cinetixx_service import SAMPLE_ROW
+from tests.services.test_cinetixx_service import SAMPLE_DISCOVERY, SAMPLE_ROW
 
 
 @pytest.fixture
@@ -19,6 +19,10 @@ def app_with_cinetixx_mock():
         json.dumps({"shows": [SAMPLE_ROW]}),
         "application/json",
     )
+    mock_cinetixx_client.search_cinemas.return_value = {
+        "searchList": [{"searchObject": SAMPLE_DISCOVERY}],
+    }
+    mock_cinetixx_client.get_cinema.return_value = SAMPLE_DISCOVERY
     app = create_application()
 
     async def override_get_cinetixx_service() -> AsyncGenerator[CinetixxService, None]:
@@ -56,6 +60,29 @@ class TestGetCinetixxShowInfo:
             response = await client.get("/api/v1/cinetixx/show-info")
 
         assert response.status_code == 422
+
+    async def test_discovers_mandators_by_search(self, app_with_cinetixx_mock):
+        app, mock_cinetixx_client = app_with_cinetixx_mock
+
+        async with self._client(app) as client:
+            response = await client.get("/api/v1/cinetixx/mandators?search=acud")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data[0]["cinemaId"] == "1627459203"
+        assert data[0]["mandatorId"] == 1627457285
+        assert data[0]["cinemaName"] == "ACUDkino GmbH"
+        mock_cinetixx_client.search_cinemas.assert_awaited_once()
+
+    async def test_discovers_mandator_by_cinema_id(self, app_with_cinetixx_mock):
+        app, mock_cinetixx_client = app_with_cinetixx_mock
+
+        async with self._client(app) as client:
+            response = await client.get("/api/v1/cinetixx/mandators?cinemaId=1627459203")
+
+        assert response.status_code == 200
+        assert response.json()[0]["mandatorId"] == 1627457285
+        mock_cinetixx_client.get_cinema.assert_awaited_once_with("1627459203")
 
     async def test_returns_normalized_shows(self, app_with_cinetixx_mock):
         app, _ = app_with_cinetixx_mock

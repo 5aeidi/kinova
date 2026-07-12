@@ -1,7 +1,34 @@
 """Application configuration loaded from environment variables."""
 
-from pydantic import Field
-from pydantic_settings import BaseSettings, SettingsConfigDict
+import json
+from typing import Annotated, Any
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+StringList = Annotated[list[str], NoDecode]
+IntList = Annotated[list[int], NoDecode]
+
+
+def _parse_list_value(value: Any) -> list[Any]:
+    """Parse JSON arrays, comma-separated strings, blank values, or existing lists."""
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, (tuple, set)):
+        return list(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        if text.startswith("["):
+            parsed = json.loads(text)
+            if not isinstance(parsed, list):
+                raise ValueError("Expected a JSON array")
+            return parsed
+        return [part.strip() for part in text.split(",") if part.strip()]
+    return [value]
 
 
 class Settings(BaseSettings):
@@ -41,6 +68,10 @@ class Settings(BaseSettings):
         default="https://api.cinetixx.de/Services/CinetixxService.asmx/GetShowInfoV6",
         description="Cinetixx legacy showtime endpoint",
     )
+    cinetixx_cinema_search_url: str = Field(
+        default="https://booking.cinetixx.de/api/cinemas/",
+        description="Cinetixx cinema discovery endpoint",
+    )
     cinetixx_request_timeout: float = Field(
         default=30.0,
         description="Cinetixx HTTP request timeout in seconds",
@@ -53,9 +84,13 @@ class Settings(BaseSettings):
         default=600,
         description="How often to refresh the local Cinetixx cache",
     )
-    cinetixx_sync_mandator_ids: list[int] = Field(
+    cinetixx_sync_mandator_ids: IntList = Field(
         default_factory=list,
         description="Cinetixx mandator IDs to pre-fetch during cache refresh",
+    )
+    cinetixx_sync_discovery_searches: StringList = Field(
+        default_factory=list,
+        description="Cinetixx cinema search terms whose mandators are rediscovered on refresh",
     )
     cinetixx_sync_show_days: int = Field(
         default=7,
@@ -69,7 +104,7 @@ class Settings(BaseSettings):
         default=600,
         description="How often to refresh the local Kinoheld cache",
     )
-    kinoheld_sync_cinema_ids: list[str] = Field(
+    kinoheld_sync_cinema_ids: StringList = Field(
         default_factory=list,
         description="Cinema IDs to pre-fetch shows for during cache refresh",
     )
@@ -125,6 +160,16 @@ class Settings(BaseSettings):
         default=True,
         description="Run a fallback text search when LLM parsing fails",
     )
+
+    @field_validator("cinetixx_sync_mandator_ids", mode="before")
+    @classmethod
+    def _parse_int_list(cls, value: Any) -> list[int]:
+        return [int(item) for item in _parse_list_value(value)]
+
+    @field_validator("cinetixx_sync_discovery_searches", "kinoheld_sync_cinema_ids", mode="before")
+    @classmethod
+    def _parse_string_list(cls, value: Any) -> list[str]:
+        return [str(item).strip() for item in _parse_list_value(value) if str(item).strip()]
 
     @property
     def api_v1_prefix(self) -> str:

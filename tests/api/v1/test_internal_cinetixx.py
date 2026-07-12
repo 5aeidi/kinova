@@ -9,7 +9,7 @@ import pytest
 from app.main import create_application
 from app.services.cinetixx import CinetixxService
 from app.services.cinetixx_cache import CinetixxCache
-from tests.services.test_cinetixx_service import SAMPLE_ROW
+from tests.services.test_cinetixx_service import SAMPLE_DISCOVERY, SAMPLE_ROW
 
 
 @pytest.fixture
@@ -21,6 +21,9 @@ def app_with_cinetixx_cache():
         json.dumps({"shows": [SAMPLE_ROW]}),
         "application/json",
     )
+    mock_client.search_cinemas.return_value = {
+        "searchList": [{"searchObject": SAMPLE_DISCOVERY}],
+    }
     service = CinetixxService(mock_client)
 
     async def override_cache():
@@ -62,6 +65,20 @@ class TestInternalCinetixx:
 
         assert response.status_code == 200
         assert response.json()[0]["title"] == "Dune"
+
+    async def test_mandators_endpoint_caches_discovery(self, app_with_cinetixx_cache):
+        app, mock_client = app_with_cinetixx_cache
+
+        async with self._client(app) as client:
+            response = await client.get("/api/v1/internal/cinetixx/mandators?search=acud")
+            cached = await client.get("/api/v1/internal/cinetixx/mandators?search=acud")
+            health = await client.get("/api/v1/internal/cinetixx/health")
+
+        assert response.status_code == 200
+        assert response.json()[0]["mandatorId"] == 1627457285
+        assert cached.json()[0]["cinemaId"] == "1627459203"
+        assert health.json()["cached_discovered_mandators"] == 1
+        mock_client.search_cinemas.assert_awaited_once()
 
     @staticmethod
     def _client(app) -> httpx.AsyncClient:

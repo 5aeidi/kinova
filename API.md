@@ -899,6 +899,56 @@ curl "http://localhost:8000/api/v1/cinetixx/show-info?mandatorId=1234"
 
 ### Normalized Cinetixx Resource Routes
 
+Use `/cinetixx/mandators` when you know a Cinetixx cinema name, city, or booking
+`cinemaId` but do not know the legacy `mandatorId`.
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| GET | `/cinetixx/mandators` | Discover current Cinetixx mandator IDs from the booking cinema index |
+
+Query parameters:
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `search` | string | No | — | Cinema name or city search |
+| `cinemaId` | string | No | — | Exact Cinetixx booking cinema ID, e.g. the `kino`/`cinemaId` value from a booking URL |
+| `lat`, `lon` | number | No | — | Optional coordinates for distance-aware search |
+| `page` | integer | No | — | Upstream result page |
+| `limit` | integer | No | `100` | Max results, sent upstream as `pageSize` |
+
+Examples:
+
+```bash
+curl "http://localhost:8000/api/v1/cinetixx/mandators?search=ACUDkino"
+curl "http://localhost:8000/api/v1/cinetixx/mandators?cinemaId=1627459203"
+```
+
+Example response:
+
+```json
+[
+  {
+    "source": "cinetixx",
+    "cinemaId": "1627459203",
+    "mandatorId": 1627457285,
+    "name": "ACUDkino GmbH - Berlin",
+    "cinemaName": "ACUDkino GmbH",
+    "mandatorName": "Kaczor; Berlin",
+    "address": "Veteranenstr. 21, 10119 Berlin",
+    "city": "Berlin",
+    "postCode": "10119",
+    "phone": "",
+    "latitude": 52.533608,
+    "longitude": 13.40086,
+    "hasShows": true,
+    "programUrl": "http://booking.cinetixx.de/frontend/#/program/1627459203",
+    "prettyProgramUrl": "http://booking.cinetixx.de/Kinoprogramm/acudkino+gmbh-berlin",
+    "giftCardsUrl": "http://booking.cinetixx.de/frontend/?gutscheine=1627459203",
+    "cardBalanceUrl": "http://booking.cinetixx.de/frontend/?guthaben=1627459203"
+  }
+]
+```
+
 These routes derive Kinoheld-like read-only resources from the legacy show-info/program payload. They only contain fields Cinetixx exposes in the payload for the requested `mandatorId`; use `/cinetixx/show-info` if you need the unmodified source body.
 
 If `mandatorId` is omitted, the live routes use configured `CINETIXX_SYNC_MANDATOR_IDS`. If that list is empty, they return an empty list.
@@ -943,6 +993,13 @@ curl "http://localhost:8000/api/v1/internal/cinetixx/movies?mandatorId=1234"
 ```
 
 The cache refreshes periodically from `CINETIXX_SYNC_MANDATOR_IDS`. If an internal request includes a `mandatorId` that is not cached yet, Kinova fetches and stores it on demand.
+
+The cache can also rediscover mandators periodically from
+`CINETIXX_SYNC_DISCOVERY_SEARCHES`. Use specific cinema names rather than broad
+city searches when you enable this, because each discovered mandator is
+pre-fetched during refresh. List-style env values accept JSON arrays or
+comma-separated strings, for example `CINETIXX_SYNC_DISCOVERY_SEARCHES=ACUDkino`
+or `CINETIXX_SYNC_MANDATOR_IDS=1627457285,42`.
 
 ## Unified Internal Layer
 

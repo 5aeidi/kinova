@@ -31,6 +31,30 @@ class CinetixxShowInfo(BaseModel):
     data: Any = None
 
 
+class CinetixxMandator(BaseModel):
+    """Cinetixx mandator discovered from the public booking cinema index."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    source: str = "cinetixx"
+    cinema_id: str = Field(..., alias="cinemaId")
+    mandator_id: int = Field(..., alias="mandatorId")
+    name: str | None = None
+    cinema_name: str | None = Field(default=None, alias="cinemaName")
+    mandator_name: str | None = Field(default=None, alias="mandatorName")
+    address: str | None = None
+    city: str | None = None
+    post_code: str | None = Field(default=None, alias="postCode")
+    phone: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    has_shows: bool | None = Field(default=None, alias="hasShows")
+    program_url: str | None = Field(default=None, alias="programUrl")
+    pretty_program_url: str | None = Field(default=None, alias="prettyProgramUrl")
+    gift_cards_url: str | None = Field(default=None, alias="giftCardsUrl")
+    card_balance_url: str | None = Field(default=None, alias="cardBalanceUrl")
+
+
 class CinetixxPrice(BaseModel):
     """Cinetixx show price information when present in the source payload."""
 
@@ -163,6 +187,19 @@ class CinetixxCinemaSearchParams(BaseModel):
 
     mandator_id: int | None = Field(default=None, alias="mandatorId", gt=0)
     search: str | None = None
+    limit: int = Field(default=100, ge=1, le=1000)
+
+
+class CinetixxMandatorSearchParams(BaseModel):
+    """Query parameters for Cinetixx mandator discovery."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    search: str | None = None
+    cinema_id: str | None = Field(default=None, alias="cinemaId")
+    lat: float | None = None
+    lon: float | None = None
+    page: int | None = Field(default=None, ge=1)
     limit: int = Field(default=100, ge=1, le=1000)
 
 

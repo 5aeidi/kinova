@@ -54,6 +54,7 @@ All routes are prefixed with `/api/v1`.
 | GET | `/cities/me` | City inferred from request IP |
 | GET | `/genres` | List genres |
 | GET | `/cinetixx/show-info` | Fetch Cinetixx legacy showtime data by `mandatorId` |
+| GET | `/cinetixx/mandators` | Discover Cinetixx `mandatorId` values by cinema name, city, or `cinemaId` |
 | GET | `/cinetixx/cinemas` | List Cinetixx cinemas derived from program data |
 | GET | `/cinetixx/movies` | List Cinetixx movies/events derived from program data |
 | GET | `/cinetixx/shows` | List Cinetixx shows derived from program data |
@@ -79,6 +80,9 @@ curl "http://localhost:8000/api/v1/genres"
 
 # Cinetixx legacy showtime data for a known mandatorId
 curl "http://localhost:8000/api/v1/cinetixx/show-info?mandatorId=1234"
+
+# Discover the current mandatorId for a Cinetixx cinema
+curl "http://localhost:8000/api/v1/cinetixx/mandators?search=ACUDkino"
 
 # Normalized Cinetixx shows and internal cached shows
 curl "http://localhost:8000/api/v1/cinetixx/shows?mandatorId=1234"
@@ -179,10 +183,12 @@ This project exposes the most useful read-only queries first. You can extend `ap
 | `KINOHELD_POOL_LIMITS` | `10` | Connection pool size |
 | `KINOHELD_AFFILIATE_KEY` | `None` | Optional affiliate key |
 | `CINETIXX_SHOW_INFO_URL` | `https://api.cinetixx.de/Services/CinetixxService.asmx/GetShowInfoV6` | Cinetixx legacy showtime endpoint |
+| `CINETIXX_CINEMA_SEARCH_URL` | `https://booking.cinetixx.de/api/cinemas/` | Cinetixx cinema discovery endpoint |
 | `CINETIXX_REQUEST_TIMEOUT` | `30.0` | Cinetixx HTTP timeout |
 | `CINETIXX_POOL_LIMITS` | `10` | Cinetixx connection pool size |
 | `CINETIXX_SYNC_INTERVAL_SECONDS` | `600` | Cinetixx cache refresh interval |
-| `CINETIXX_SYNC_MANDATOR_IDS` | `[]` | Mandator IDs to pre-fetch into the internal Cinetixx cache |
+| `CINETIXX_SYNC_MANDATOR_IDS` | `[]` | Mandator IDs to pre-fetch into the internal Cinetixx cache; accepts comma-separated values like `1627457285,42` |
+| `CINETIXX_SYNC_DISCOVERY_SEARCHES` | `[]` | Specific cinema search terms whose current mandators are rediscovered and pre-fetched on each refresh; accepts comma-separated values like `ACUDkino` |
 | `CINETIXX_SYNC_SHOW_DAYS` | `7` | Default number of Cinetixx show days returned by date filters |
 
 ## Running tests

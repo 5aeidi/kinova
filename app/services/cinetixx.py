@@ -16,6 +16,8 @@ from app.schemas.cinetixx import (
     CinetixxDataset,
     CinetixxGenre,
     CinetixxGenreSearchParams,
+    CinetixxMandator,
+    CinetixxMandatorSearchParams,
     CinetixxMovie,
     CinetixxMovieSearchParams,
     CinetixxPrice,
@@ -36,7 +38,41 @@ def _matches(value: str | None, query: str | None) -> bool:
     return query.casefold() in value.casefold()
 
 
+def _key_token(key: str) -> str:
+    """Normalize Cinetixx field names across camelCase, snake_case, and XML tags."""
+    return re.sub(r"[^a-z0-9]", "", key.casefold())
+
+
+def _row_value(row: dict[str, Any], *keys: str) -> Any:
+    """Return a row value using exact or normalized field-name matching."""
+    for key in keys:
+        if key in row:
+            return row[key]
+
+    key_tokens = {_key_token(key) for key in keys}
+    for row_key, value in row.items():
+        if isinstance(row_key, str) and _key_token(row_key) in key_tokens:
+            return value
+    return None
+
+
+def _row_attribute(row: dict[str, Any], *keys: str) -> Any:
+    """Return an XML attribute value parsed by `_element_to_data`."""
+    attributes = row.get("attributes")
+    if not isinstance(attributes, dict):
+        return None
+    return _row_value(attributes, *keys)
+
+
+def _scalar_value(value: Any) -> Any:
+    """Extract scalar text from an XML element representation when present."""
+    if isinstance(value, dict) and "text" in value:
+        return value["text"]
+    return value
+
+
 def _as_str(value: Any) -> str | None:
+    value = _scalar_value(value)
     if value is None:
         return None
     text = str(value).strip()
@@ -44,6 +80,7 @@ def _as_str(value: Any) -> str | None:
 
 
 def _as_int(value: Any) -> int | None:
+    value = _scalar_value(value)
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -51,6 +88,7 @@ def _as_int(value: Any) -> int | None:
 
 
 def _as_bool(value: Any) -> bool | None:
+    value = _scalar_value(value)
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -74,6 +112,16 @@ def _as_datetime(value: Any) -> dt.datetime | None:
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=dt.timezone.utc)
     return parsed
+
+
+def _as_string_list(value: Any) -> list[str]:
+    value = _scalar_value(value)
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [text for item in value if (text := _as_str(item))]
+    text = _as_str(value)
+    return [text] if text else []
 
 
 def _split_people(value: Any) -> list[str]:
@@ -101,6 +149,27 @@ class CinetixxService:
     async def get_show_info_by_mandator(self, mandator_id: int) -> CinetixxShowInfo:
         """Fetch and parse legacy Cinetixx showtime data by mandator ID."""
         return await self.get_show_info(CinetixxShowInfoParams(mandator_id=mandator_id))
+
+    async def discover_mandators(
+        self,
+        params: CinetixxMandatorSearchParams,
+    ) -> list[CinetixxMandator]:
+        """Discover Cinetixx mandator IDs from the booking cinema index."""
+        if params.cinema_id:
+            payload = await self.client.get_cinema(params.cinema_id)
+            mandator = self._payload_to_mandator(payload)
+            if mandator is None:
+                raise CinetixxNotFoundError(f"Cinetixx cinema {params.cinema_id} not found")
+            return [mandator]
+
+        payload = await self.client.search_cinemas(
+            search=params.search,
+            lat=params.lat,
+            lon=params.lon,
+            page=params.page,
+            page_size=params.limit,
+        )
+        return self._extract_mandators(payload)[: params.limit]
 
     async def get_dataset(self, mandator_id: int | None = None) -> CinetixxDataset:
         """Fetch and normalize Cinetixx program data for one or more mandators."""
@@ -290,10 +359,86 @@ class CinetixxService:
         """Filter normalized Cinetixx genres."""
         return [genre for genre in genres if _matches(genre.name, params.search)][: params.limit]
 
+    @staticmethod
+    def filter_mandators(
+        mandators: list[CinetixxMandator],
+        params: CinetixxMandatorSearchParams,
+    ) -> list[CinetixxMandator]:
+        """Filter discovered Cinetixx mandators."""
+        results = []
+        for mandator in mandators:
+            if params.cinema_id and mandator.cinema_id != params.cinema_id:
+                continue
+            if (
+                _matches(mandator.name, params.search)
+                or _matches(mandator.cinema_name, params.search)
+                or _matches(mandator.mandator_name, params.search)
+                or _matches(mandator.address, params.search)
+                or _matches(mandator.city, params.search)
+            ):
+                results.append(mandator)
+        return results[: params.limit]
+
     def _resolve_mandator_ids(self, mandator_id: int | None) -> list[int]:
         if mandator_id is not None:
             return [mandator_id]
         return list(settings.cinetixx_sync_mandator_ids)
+
+    @classmethod
+    def _extract_mandators(cls, data: Any) -> list[CinetixxMandator]:
+        if isinstance(data, dict):
+            raw_items = data.get("searchList")
+            if isinstance(raw_items, list):
+                return cls._mandators_from_items(raw_items)
+            if data.get("id") is not None or data.get("mandatorId") is not None:
+                mandator = cls._payload_to_mandator(data)
+                return [mandator] if mandator else []
+        if isinstance(data, list):
+            return cls._mandators_from_items(data)
+        return []
+
+    @classmethod
+    def _mandators_from_items(cls, items: list[Any]) -> list[CinetixxMandator]:
+        mandators: dict[str, CinetixxMandator] = {}
+        for item in items:
+            raw = item.get("searchObject") if isinstance(item, dict) else item
+            mandator = cls._payload_to_mandator(raw)
+            if mandator is not None:
+                mandators[mandator.cinema_id] = mandator
+        return list(mandators.values())
+
+    @staticmethod
+    def _payload_to_mandator(payload: Any) -> CinetixxMandator | None:
+        if not isinstance(payload, dict):
+            return None
+
+        cinema_id = _as_str(payload.get("id") or payload.get("cinemaId"))
+        mandator_id = _as_int(payload.get("mandatorId"))
+        if cinema_id is None or mandator_id is None:
+            return None
+
+        return CinetixxMandator(
+            cinemaId=cinema_id,
+            mandatorId=mandator_id,
+            name=_as_str(payload.get("name")),
+            cinemaName=_as_str(payload.get("cinemaName")),
+            mandatorName=_as_str(payload.get("mandatorName")),
+            address=_as_str(payload.get("address")),
+            city=_as_str(payload.get("city")),
+            postCode=_as_str(payload.get("postCode")),
+            phone=_as_str(payload.get("phone")),
+            latitude=payload.get("latitude"),
+            longitude=payload.get("longitude"),
+            hasShows=_as_bool(payload.get("hasShows")),
+            programUrl=_as_str(payload.get("_urlProgram") or payload.get("programUrl")),
+            prettyProgramUrl=_as_str(
+                payload.get("_urlPrettyProgram") or payload.get("prettyProgramUrl"),
+            ),
+            giftCardsUrl=_as_str(payload.get("_urlGiftCards") or payload.get("giftCardsUrl")),
+            cardBalanceUrl=_as_str(
+                payload.get("_urlCardBalance") or payload.get("cardBalanceUrl"),
+            ),
+        )
 
     @classmethod
     def _extract_show_rows(cls, data: Any) -> list[dict[str, Any]]:
@@ -332,56 +477,46 @@ class CinetixxService:
             "cinemaId",
             "saal",
         }
-        return any(key in row for key in show_keys)
+        normalized = {_key_token(key) for key in row if isinstance(key, str)}
+        return bool(normalized & {_key_token(key) for key in show_keys})
 
     @classmethod
     def _row_to_show(cls, row: dict[str, Any], fallback_mandator_id: int) -> CinetixxShow:
-        mandator_id = _as_int(row.get("mandatorId")) or fallback_mandator_id
-        show_id = _as_str(row.get("showId") or row.get("id"))
-        movie_id = _as_str(row.get("movieId"))
-        event_id = _as_str(row.get("eventId"))
-        begins_at = _as_datetime(row.get("showBeginning") or row.get("startday"))
+        mandator_id = _as_int(_row_value(row, "mandatorId")) or fallback_mandator_id
+        show_id = _as_str(_row_value(row, "showId", "id") or _row_attribute(row, "id"))
+        movie_id = _as_str(_row_value(row, "movieId"))
+        event_id = _as_str(_row_value(row, "eventId"))
+        begins_at = _as_datetime(_row_value(row, "showBeginning", "startday"))
         flags = cls._extract_flags(row)
-        prices = [
-            CinetixxPrice(
-                amount=price.get("amount") if isinstance(price, dict) else None,
-                category=_as_str(price.get("categorie") or price.get("category"))
-                if isinstance(price, dict)
-                else None,
-                area=_as_str(price.get("area")) if isinstance(price, dict) else None,
-                isDefault=_as_bool(price.get("default")) if isinstance(price, dict) else None,
-            )
-            for price in row.get("prices", [])
-            if isinstance(price, dict)
-        ]
+        prices = cls._extract_prices(row)
         return CinetixxShow(
             id=show_id or f"{mandator_id}:{movie_id or event_id or len(str(row))}",
             mandatorId=mandator_id,
             showId=show_id,
             movieId=movie_id,
             eventId=event_id,
-            movieTitle=_as_str(row.get("veranstaltungstitel") or row.get("title")),
-            text=_as_str(row.get("text")),
+            movieTitle=_as_str(_row_value(row, "veranstaltungstitel", "title")),
+            text=_as_str(_row_value(row, "text")),
             beginsAt=begins_at,
             date=begins_at.date() if begins_at else None,
-            bookingUrl=_as_str(row.get("bookingLink")),
-            cinemaId=_as_str(row.get("cinemaId")),
-            cinemaName=_as_str(row.get("kino")),
-            cityId=_as_str(row.get("cityId")),
-            city=_as_str(row.get("stadt")),
-            auditoriumId=_as_str(row.get("auditoriumId")),
-            auditoriumName=_as_str(row.get("saal")),
-            language=_as_str(row.get("language") or row.get("sprachversion")),
-            version=_as_str(row.get("versiontype")),
-            audioType=_as_str(row.get("audiotype")),
-            ageRating=_as_str(row.get("altersfreigabe")),
-            duration=_as_int(row.get("spieldauerEvent")),
-            is3d=_as_bool(row.get("flag3D")),
-            hasSeatSelection=_as_bool(row.get("seatselection")),
-            salesStart=_as_datetime(row.get("verkaufsstart")),
-            salesEnd=_as_datetime(row.get("verkaufsende")),
-            reservationStart=_as_datetime(row.get("reservierungsstart")),
-            reservationEnd=_as_datetime(row.get("reservierungsende")),
+            bookingUrl=_as_str(_row_value(row, "bookingLink")),
+            cinemaId=_as_str(_row_value(row, "cinemaId")),
+            cinemaName=_as_str(_row_value(row, "kino")),
+            cityId=_as_str(_row_value(row, "cityId")),
+            city=_as_str(_row_value(row, "stadt")),
+            auditoriumId=_as_str(_row_value(row, "auditoriumId")),
+            auditoriumName=_as_str(_row_value(row, "saal")),
+            language=_as_str(_row_value(row, "language", "sprachversion")),
+            version=_as_str(_row_value(row, "versiontype")),
+            audioType=_as_str(_row_value(row, "audiotype")),
+            ageRating=_as_str(_row_value(row, "altersfreigabe")),
+            duration=_as_int(_row_value(row, "spieldauerEvent")),
+            is3d=_as_bool(_row_value(row, "flag3D")),
+            hasSeatSelection=_as_bool(_row_value(row, "seatselection")),
+            salesStart=_as_datetime(_row_value(row, "verkaufsstart")),
+            salesEnd=_as_datetime(_row_value(row, "verkaufsende")),
+            reservationStart=_as_datetime(_row_value(row, "reservierungsstart")),
+            reservationEnd=_as_datetime(_row_value(row, "reservierungsende")),
             flags=flags,
             prices=prices,
             raw=row,
@@ -390,18 +525,49 @@ class CinetixxService:
     @staticmethod
     def _extract_flags(row: dict[str, Any]) -> list[str]:
         flags: list[str] = []
-        if _as_bool(row.get("flag3D")):
+        if _as_bool(_row_value(row, "flag3D")):
             flags.append("3D")
         for key in ("sprachversion", "versiontype", "language", "audiotype", "aspectratio"):
-            value = _as_str(row.get(key))
+            value = _as_str(_row_value(row, key))
             if value and value not in flags:
                 flags.append(value)
-        type_value = row.get("type")
+        type_value = _row_value(row, "type")
         if isinstance(type_value, dict):
-            value = _as_str(type_value.get("value") or type_value.get("key"))
+            value = _as_str(
+                type_value
+                or _row_value(type_value, "value", "key")
+                or _row_attribute(type_value, "key"),
+            )
+            if value and value not in flags:
+                flags.append(value)
+        else:
+            value = _as_str(type_value)
             if value and value not in flags:
                 flags.append(value)
         return flags
+
+    @staticmethod
+    def _extract_prices(row: dict[str, Any]) -> list[CinetixxPrice]:
+        raw_prices = _row_value(row, "prices", "price")
+        price_items = raw_prices if isinstance(raw_prices, list) else [raw_prices]
+        prices: list[CinetixxPrice] = []
+        for price in price_items:
+            if price is None:
+                continue
+            if isinstance(price, dict):
+                prices.append(
+                    CinetixxPrice(
+                        amount=_row_value(price, "amount"),
+                        category=_as_str(_row_value(price, "categorie", "category") or price),
+                        area=_as_str(_row_value(price, "area")),
+                        isDefault=_as_bool(_row_value(price, "default", "isDefault")),
+                    ),
+                )
+                continue
+            category = _as_str(price)
+            if category:
+                prices.append(CinetixxPrice(category=category))
+        return prices
 
     @classmethod
     def _derive_cinemas(cls, shows: list[CinetixxShow]) -> list[CinetixxCinema]:
@@ -433,27 +599,27 @@ class CinetixxService:
             title = show.movie_title or show.text or "Untitled Cinetixx event"
             resource_id = movie_id or event_id or title.casefold()
             genres = cls._genre_values(row)
-            categories = [value for value in row.get("categories", []) if isinstance(value, str)]
+            categories = _as_string_list(_row_value(row, "categories"))
             movies[resource_id] = CinetixxMovie(
                 id=resource_id,
                 movieId=movie_id,
                 eventId=event_id,
                 title=title,
-                shortTitle=_as_str(row.get("veranstaltungskurztitel")),
-                description=_as_str(row.get("text")),
-                shortDescription=_as_str(row.get("textShort")),
+                shortTitle=_as_str(_row_value(row, "veranstaltungskurztitel")),
+                description=_as_str(_row_value(row, "text")),
+                shortDescription=_as_str(_row_value(row, "textShort")),
                 duration=show.duration,
                 genres=genres,
                 categories=categories,
-                actors=_split_people(row.get("actor")),
-                directors=_split_people(row.get("director")),
-                screenWriters=_split_people(row.get("screenWriter")),
-                year=_as_str(row.get("year")),
-                country=_as_str(row.get("country")),
-                artwork=_as_str(row.get("artwork") or row.get("image1")),
-                artworkBig=_as_str(row.get("artworkBig")),
-                trailerUrl=_as_str(row.get("eventTrailer")),
-                movieUrl=_as_str(row.get("movieLink")),
+                actors=_split_people(_row_value(row, "actor")),
+                directors=_split_people(_row_value(row, "director")),
+                screenWriters=_split_people(_row_value(row, "screenWriter")),
+                year=_as_str(_row_value(row, "year")),
+                country=_as_str(_row_value(row, "country")),
+                artwork=_as_str(_row_value(row, "artwork", "image1")),
+                artworkBig=_as_str(_row_value(row, "artworkBig")),
+                trailerUrl=_as_str(_row_value(row, "eventTrailer")),
+                movieUrl=_as_str(_row_value(row, "movieLink")),
             )
         return list(movies.values())
 
@@ -486,14 +652,11 @@ class CinetixxService:
     @staticmethod
     def _genre_values(row: dict[str, Any]) -> list[str]:
         values: list[str] = []
-        genre = _as_str(row.get("genre"))
+        genre = _as_str(_row_value(row, "genre"))
         if genre:
             values.extend(part.strip() for part in re.split(r"[,;/|]", genre) if part.strip())
-        categories = row.get("categories")
-        if isinstance(categories, list):
-            values.extend(
-                value.strip() for value in categories if isinstance(value, str) and value.strip()
-            )
+        values.extend(_as_string_list(_row_value(row, "categories")))
+        values = [value for value in values if value != "-"]
         return list(dict.fromkeys(values))
 
     # ------------------------------------------------------------------

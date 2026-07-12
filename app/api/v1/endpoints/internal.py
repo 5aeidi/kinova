@@ -21,6 +21,8 @@ from app.schemas.cinetixx import (
     CinetixxCitySearchParams,
     CinetixxGenre,
     CinetixxGenreSearchParams,
+    CinetixxMandator,
+    CinetixxMandatorSearchParams,
     CinetixxMovie,
     CinetixxMovieSearchParams,
     CinetixxShow,
@@ -237,6 +239,7 @@ async def cinetixx_health_check(cache: CinetixxCacheDep) -> dict:
         "source": "cinetixx-cache",
         "last_refresh": snapshot["last_refresh"],
         "cached_mandators": snapshot["mandators"],
+        "cached_discovered_mandators": snapshot["discovered_mandators"],
         "cached_cinemas": snapshot["cinemas"],
         "cached_movies": snapshot["movies"],
         "cached_shows": snapshot["shows"],
@@ -254,6 +257,32 @@ async def get_cinetixx_show_info_internal(
     """Fetch cached raw Cinetixx show-info, populating it on demand."""
     await _ensure_cinetixx_cached(cache, service, mandator_id)
     return await cache.get_show_info(mandator_id)
+
+
+@router.get("/cinetixx/mandators", response_model=list[CinetixxMandator])
+async def discover_cinetixx_mandators_internal(
+    cache: CinetixxCacheDep,
+    service: CinetixxCachedServiceDep,
+    search: Annotated[str | None, Query(description="Cinema name or city search")] = None,
+    cinema_id: Annotated[str | None, Query(alias="cinemaId")] = None,
+    lat: Annotated[float | None, Query(description="Latitude for distance-aware search")] = None,
+    lon: Annotated[float | None, Query(description="Longitude for distance-aware search")] = None,
+    page: Annotated[int | None, Query(ge=1)] = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+) -> list[CinetixxMandator]:
+    """Discover and cache Cinetixx mandator IDs on demand."""
+    params = CinetixxMandatorSearchParams(
+        search=search,
+        cinema_id=cinema_id,
+        lat=lat,
+        lon=lon,
+        page=page,
+        limit=limit,
+    )
+    cached = await cache.search_mandators(params)
+    if cached:
+        return cached
+    return await cache.cache_mandators(service, params)
 
 
 @router.get("/cinetixx/cinemas", response_model=list[CinetixxCinema])

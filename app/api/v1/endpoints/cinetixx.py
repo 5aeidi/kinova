@@ -13,6 +13,8 @@ from app.schemas.cinetixx import (
     CinetixxCitySearchParams,
     CinetixxGenre,
     CinetixxGenreSearchParams,
+    CinetixxMandator,
+    CinetixxMandatorSearchParams,
     CinetixxMovie,
     CinetixxMovieSearchParams,
     CinetixxShow,
@@ -41,6 +43,28 @@ async def get_show_info(
 ) -> CinetixxShowInfo:
     """Fetch Cinetixx legacy showtime data by mandator ID."""
     return await service.get_show_info_by_mandator(mandator_id)
+
+
+@router.get("/mandators", response_model=list[CinetixxMandator])
+async def discover_mandators(
+    service: ServiceDep,
+    search: Annotated[str | None, Query(description="Cinema name or city search")] = None,
+    cinema_id: Annotated[str | None, Query(alias="cinemaId")] = None,
+    lat: Annotated[float | None, Query(description="Latitude for distance-aware search")] = None,
+    lon: Annotated[float | None, Query(description="Longitude for distance-aware search")] = None,
+    page: Annotated[int | None, Query(ge=1)] = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+) -> list[CinetixxMandator]:
+    """Discover Cinetixx mandator IDs from the booking cinema index."""
+    params = CinetixxMandatorSearchParams(
+        search=search,
+        cinema_id=cinema_id,
+        lat=lat,
+        lon=lon,
+        page=page,
+        limit=limit,
+    )
+    return await service.discover_mandators(params)
 
 
 @router.get("/cinemas", response_model=list[CinetixxCinema])

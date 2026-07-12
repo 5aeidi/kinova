@@ -16,6 +16,8 @@ from app.schemas.cinetixx import (
     CinetixxDataset,
     CinetixxGenre,
     CinetixxGenreSearchParams,
+    CinetixxMandator,
+    CinetixxMandatorSearchParams,
     CinetixxMovie,
     CinetixxMovieSearchParams,
     CinetixxShow,
@@ -34,19 +36,50 @@ class CinetixxCache:
         self._lock = asyncio.Lock()
         self._payloads: dict[int, CinetixxShowInfo] = {}
         self._datasets: dict[int, CinetixxDataset] = {}
+        self._mandators: dict[str, CinetixxMandator] = {}
         self._last_refresh: dt.datetime | None = None
 
     async def refresh(self, service: CinetixxService) -> None:
-        """Fetch configured Cinetixx mandators and rebuild the cache atomically."""
+        """Refresh configured Cinetixx discovery searches and mandator data."""
         logger.info("Starting Cinetixx cache refresh")
 
+        async with self._lock:
+            existing_payloads = dict(self._payloads)
+            existing_datasets = {
+                mandator_id: dataset.model_copy(deep=True)
+                for mandator_id, dataset in self._datasets.items()
+            }
+            existing_mandators = {
+                cinema_id: mandator.model_copy(deep=True)
+                for cinema_id, mandator in self._mandators.items()
+            }
+
+        mandators = await self._refresh_discovered_mandators(service, existing_mandators)
+        if (
+            not settings.cinetixx_sync_mandator_ids
+            and not settings.cinetixx_sync_discovery_searches
+            and not existing_datasets
+        ):
+            logger.info(
+                "No Cinetixx sync seed configured; set CINETIXX_SYNC_MANDATOR_IDS or "
+                "CINETIXX_SYNC_DISCOVERY_SEARCHES to pre-fill the cache",
+            )
+
+        mandator_ids = sorted(
+            set(settings.cinetixx_sync_mandator_ids)
+            | {item.mandator_id for item in mandators.values()}
+            | set(existing_datasets.keys()),
+        )
         payloads: dict[int, CinetixxShowInfo] = {}
         datasets: dict[int, CinetixxDataset] = {}
-        for mandator_id in settings.cinetixx_sync_mandator_ids:
+        for mandator_id in mandator_ids:
             try:
                 show_info = await service.get_show_info_by_mandator(mandator_id)
             except Exception:  # pragma: no cover - defensive
                 logger.exception("Failed to fetch Cinetixx mandator %s", mandator_id)
+                if mandator_id in existing_payloads and mandator_id in existing_datasets:
+                    payloads[mandator_id] = existing_payloads[mandator_id]
+                    datasets[mandator_id] = existing_datasets[mandator_id]
                 continue
 
             payloads[mandator_id] = show_info
@@ -55,16 +88,42 @@ class CinetixxCache:
         async with self._lock:
             self._payloads = payloads
             self._datasets = datasets
+            self._mandators = mandators
             self._last_refresh = dt.datetime.now(tz=dt.timezone.utc)
 
         merged = CinetixxService.merge_datasets(list(datasets.values()))
         logger.info(
-            "Cinetixx cache refresh complete: %d mandators, %d cinemas, %d movies, %d shows",
+            "Cinetixx cache refresh complete: %d discovered, %d mandators, %d cinemas, "
+            "%d movies, %d shows",
+            len(mandators),
             len(datasets),
             len(merged.cinemas),
             len(merged.movies),
             len(merged.shows),
         )
+
+    async def _refresh_discovered_mandators(
+        self,
+        service: CinetixxService,
+        existing_mandators: dict[str, CinetixxMandator],
+    ) -> dict[str, CinetixxMandator]:
+        """Refresh configured cinema-search discoveries, preserving stale data on failure."""
+        if not settings.cinetixx_sync_discovery_searches:
+            return existing_mandators
+
+        mandators: dict[str, CinetixxMandator] = {}
+        for search in settings.cinetixx_sync_discovery_searches:
+            try:
+                discovered = await service.discover_mandators(
+                    CinetixxMandatorSearchParams(search=search),
+                )
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("Failed to discover Cinetixx mandators for %r", search)
+                mandators.update(existing_mandators)
+                continue
+
+            mandators.update({item.cinema_id: item for item in discovered})
+        return mandators
 
     async def cache_mandator(self, service: CinetixxService, mandator_id: int) -> None:
         """Fetch and cache one Cinetixx mandator on demand."""
@@ -75,6 +134,18 @@ class CinetixxCache:
             self._payloads[mandator_id] = show_info
             self._datasets[mandator_id] = dataset
             self._last_refresh = dt.datetime.now(tz=dt.timezone.utc)
+
+    async def cache_mandators(
+        self,
+        service: CinetixxService,
+        params: CinetixxMandatorSearchParams,
+    ) -> list[CinetixxMandator]:
+        """Discover and cache Cinetixx mandators on demand."""
+        mandators = await service.discover_mandators(params)
+        async with self._lock:
+            self._mandators.update({item.cinema_id: item for item in mandators})
+            self._last_refresh = dt.datetime.now(tz=dt.timezone.utc)
+        return mandators
 
     async def has_mandator(self, mandator_id: int) -> bool:
         """Return whether a mandator is already cached."""
@@ -104,6 +175,15 @@ class CinetixxCache:
         """Search cached Cinetixx cinemas."""
         dataset = await self.get_dataset(params.mandator_id)
         return CinetixxService.filter_cinemas(dataset.cinemas, params)
+
+    async def search_mandators(
+        self,
+        params: CinetixxMandatorSearchParams,
+    ) -> list[CinetixxMandator]:
+        """Search cached discovered Cinetixx mandators."""
+        async with self._lock:
+            mandators = [item.model_copy(deep=True) for item in self._mandators.values()]
+        return CinetixxService.filter_mandators(mandators, params)
 
     async def get_cinema(
         self,
@@ -176,6 +256,7 @@ class CinetixxCache:
         return {
             "last_refresh": self._last_refresh.isoformat() if self._last_refresh else None,
             "mandators": sorted(self._datasets.keys()),
+            "discovered_mandators": len(self._mandators),
             "cinemas": len(merged.cinemas),
             "movies": len(merged.movies),
             "shows": len(merged.shows),
