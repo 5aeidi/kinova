@@ -6,7 +6,7 @@
 
 **Kinova** is a small, production-ready **FastAPI** wrapper around the **Kinoheld GraphQL API**.
 
-It exposes clean REST routes for cinemas, movies, shows, cities, and genres while handling GraphQL introspection, error mapping, connection pooling, and Pydantic validation for you. It also includes source-specific Cinetixx routes and cache-backed internal Cinetixx routes for cinemas where you know the Cinetixx `mandatorId`.
+It exposes clean REST routes for cinemas, movies, shows, cities, and genres while handling GraphQL introspection, error mapping, connection pooling, and Pydantic validation for you. It also includes source-specific Cinetixx routes and cache-backed internal Cinetixx routes. Cinetixx mandators are discovered automatically from its public cinema index.
 
 ## Why this exists
 
@@ -186,9 +186,12 @@ This project exposes the most useful read-only queries first. You can extend `ap
 | `CINETIXX_CINEMA_SEARCH_URL` | `https://booking.cinetixx.de/api/cinemas/` | Cinetixx cinema discovery endpoint |
 | `CINETIXX_REQUEST_TIMEOUT` | `30.0` | Cinetixx HTTP timeout |
 | `CINETIXX_POOL_LIMITS` | `10` | Cinetixx connection pool size |
-| `CINETIXX_SYNC_INTERVAL_SECONDS` | `600` | Cinetixx cache refresh interval |
-| `CINETIXX_SYNC_MANDATOR_IDS` | `[]` | Mandator IDs to pre-fetch into the internal Cinetixx cache; accepts comma-separated values like `1627457285,42` |
-| `CINETIXX_SYNC_DISCOVERY_SEARCHES` | `[]` | Specific cinema search terms whose current mandators are rediscovered and pre-fetched on each refresh; accepts comma-separated values like `ACUDkino` |
+| `CINETIXX_SYNC_INTERVAL_SECONDS` | `3600` | Cinetixx cache refresh interval (one hour) |
+| `CINETIXX_SYNC_MANDATOR_IDS` | `[]` | Optional additional mandator IDs to pre-fetch; automatic discovery does not require this |
+| `CINETIXX_SYNC_DISCOVERY_SEARCHES` | `[]` | Optional additional cinema search terms; automatic discovery runs without this |
+| `CINETIXX_DISCOVERY_PAGE_SIZE` | `100` | Booking-index cinemas requested per discovery page |
+| `CINETIXX_DISCOVERY_MAX_PAGES` | `100` | Safety limit for booking-index discovery pages |
+| `CINETIXX_DISCOVERY_TERMS` | `a-z,0-9` | Search terms used to enumerate the public booking index; blank uses the default |
 | `CINETIXX_SYNC_SHOW_DAYS` | `7` | Default number of Cinetixx show days returned by date filters |
 
 ## Running tests

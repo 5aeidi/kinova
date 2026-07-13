@@ -2,6 +2,7 @@
 
 import datetime as dt
 import json
+import logging
 import re
 import xml.etree.ElementTree as ET
 from typing import Any
@@ -27,6 +28,8 @@ from app.schemas.cinetixx import (
     CinetixxShowSearchParams,
 )
 from app.services.cinetixx_client import CinetixxClient
+
+logger = logging.getLogger(__name__)
 
 
 def _matches(value: str | None, query: str | None) -> bool:
@@ -171,12 +174,62 @@ class CinetixxService:
         )
         return self._extract_mandators(payload)[: params.limit]
 
+    async def discover_all_mandators(self) -> list[CinetixxMandator]:
+        """Discover every mandator reachable through the public booking index.
+
+        Cinetixx's unauthenticated endpoint is a text search, not a directory:
+        a blank query returns no results. Search its built-in index terms and
+        de-duplicate the returned cinemas to enumerate mandators without
+        accepting IDs from callers or requiring configuration.
+        """
+        mandators: dict[str, CinetixxMandator] = {}
+        page_size = settings.cinetixx_discovery_page_size
+        terms = settings.cinetixx_discovery_terms or list("abcdefghijklmnopqrstuvwxyz0123456789")
+        for term in terms:
+            for page in range(1, settings.cinetixx_discovery_max_pages + 1):
+                payload = await self.client.search_cinemas(
+                    search=term,
+                    page=page,
+                    page_size=page_size,
+                )
+                discovered = self._extract_mandators(payload)
+                new_count = sum(item.cinema_id not in mandators for item in discovered)
+                mandators.update({item.cinema_id: item for item in discovered})
+                logger.info(
+                    "Cinetixx mandator discovery term=%r page %d: %d results, %d total",
+                    term,
+                    page,
+                    len(discovered),
+                    len(mandators),
+                )
+
+                # Cinetixx normally returns a short final page. Some deployments ignore
+                # pagination entirely; a duplicate page prevents an endless re-fetch.
+                if len(discovered) < page_size or new_count == 0:
+                    break
+            else:
+                logger.warning(
+                    "Cinetixx discovery term=%r stopped at configured %d-page safety limit",
+                    term,
+                    settings.cinetixx_discovery_max_pages,
+                )
+        return list(mandators.values())
+
     async def get_dataset(self, mandator_id: int | None = None) -> CinetixxDataset:
         """Fetch and normalize Cinetixx program data for one or more mandators."""
         datasets: list[CinetixxDataset] = []
-        for resolved_id in self._resolve_mandator_ids(mandator_id):
+        mandators: dict[int, CinetixxMandator] = {}
+        if mandator_id is not None:
+            mandator_ids = [mandator_id]
+        else:
+            discovered = await self.discover_all_mandators()
+            mandators = {item.mandator_id: item for item in discovered}
+            mandator_ids = sorted(set(mandators) | set(settings.cinetixx_sync_mandator_ids))
+        for resolved_id in mandator_ids:
             show_info = await self.get_show_info(CinetixxShowInfoParams(mandator_id=resolved_id))
-            datasets.append(self.normalize_show_info(show_info))
+            datasets.append(
+                self._normalize_and_enrich(show_info, mandators.get(resolved_id)),
+            )
         return self.merge_datasets(datasets)
 
     async def search_cinemas(self, params: CinetixxCinemaSearchParams) -> list[CinetixxCinema]:
@@ -276,6 +329,67 @@ class CinetixxService:
             cities=list(cities.values()),
             genres=sorted(genres.values(), key=lambda item: item.name.casefold()),
         )
+
+    def _normalize_and_enrich(
+        self,
+        show_info: CinetixxShowInfo,
+        mandator: CinetixxMandator | None,
+    ) -> CinetixxDataset:
+        """Normalize programme rows and attach booking-index metadata."""
+        return self.enrich_dataset(self.normalize_show_info(show_info), mandator)
+
+    @staticmethod
+    def enrich_dataset(
+        dataset: CinetixxDataset,
+        mandator: CinetixxMandator | None,
+    ) -> CinetixxDataset:
+        """Add booking-index cinema metadata missing from legacy programme rows."""
+        if mandator is None:
+            return dataset
+
+        cinemas = []
+        matched_mandator = False
+        for cinema in dataset.cinemas:
+            if cinema.mandator_id != mandator.mandator_id:
+                cinemas.append(cinema)
+                continue
+            matched_mandator = True
+            cinemas.append(
+                cinema.model_copy(
+                    update={
+                        "cinema_id": cinema.cinema_id or mandator.cinema_id,
+                        "name": cinema.name or mandator.cinema_name or mandator.name,
+                        "city": cinema.city or mandator.city,
+                        "address": mandator.address,
+                        "post_code": mandator.post_code,
+                        "phone": mandator.phone,
+                        "latitude": mandator.latitude,
+                        "longitude": mandator.longitude,
+                        "program_url": mandator.program_url,
+                        "pretty_program_url": mandator.pretty_program_url,
+                        "special_event_image_url": mandator.special_event_image_url,
+                    },
+                ),
+            )
+        if not matched_mandator:
+            cinemas.append(
+                CinetixxCinema(
+                    id=mandator.cinema_id,
+                    mandatorId=mandator.mandator_id,
+                    cinemaId=mandator.cinema_id,
+                    name=mandator.cinema_name or mandator.name,
+                    city=mandator.city,
+                    address=mandator.address,
+                    postCode=mandator.post_code,
+                    phone=mandator.phone,
+                    latitude=mandator.latitude,
+                    longitude=mandator.longitude,
+                    programUrl=mandator.program_url,
+                    prettyProgramUrl=mandator.pretty_program_url,
+                    specialEventImageUrl=mandator.special_event_image_url,
+                ),
+            )
+        return dataset.model_copy(update={"cinemas": cinemas})
 
     @staticmethod
     def filter_cinemas(
@@ -379,11 +493,6 @@ class CinetixxService:
                 results.append(mandator)
         return results[: params.limit]
 
-    def _resolve_mandator_ids(self, mandator_id: int | None) -> list[int]:
-        if mandator_id is not None:
-            return [mandator_id]
-        return list(settings.cinetixx_sync_mandator_ids)
-
     @classmethod
     def _extract_mandators(cls, data: Any) -> list[CinetixxMandator]:
         if isinstance(data, dict):
@@ -437,6 +546,9 @@ class CinetixxService:
             giftCardsUrl=_as_str(payload.get("_urlGiftCards") or payload.get("giftCardsUrl")),
             cardBalanceUrl=_as_str(
                 payload.get("_urlCardBalance") or payload.get("cardBalanceUrl"),
+            ),
+            specialEventImageUrl=_as_str(
+                payload.get("urlSpecialEventImage") or payload.get("specialEventImageUrl"),
             ),
         )
 

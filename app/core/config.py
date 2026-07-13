@@ -81,7 +81,7 @@ class Settings(BaseSettings):
         description="Max keepalive connections in the Cinetixx HTTP connection pool",
     )
     cinetixx_sync_interval_seconds: int = Field(
-        default=600,
+        default=3600,
         description="How often to refresh the local Cinetixx cache",
     )
     cinetixx_sync_mandator_ids: IntList = Field(
@@ -91,6 +91,22 @@ class Settings(BaseSettings):
     cinetixx_sync_discovery_searches: StringList = Field(
         default_factory=list,
         description="Cinetixx cinema search terms whose mandators are rediscovered on refresh",
+    )
+    cinetixx_discovery_page_size: int = Field(
+        default=100,
+        ge=1,
+        le=500,
+        description="Number of cinemas requested from the Cinetixx booking index per page",
+    )
+    cinetixx_discovery_max_pages: int = Field(
+        default=100,
+        ge=1,
+        le=1000,
+        description="Safety limit for pages read from the Cinetixx booking cinema index",
+    )
+    cinetixx_discovery_terms: StringList = Field(
+        default_factory=lambda: list("abcdefghijklmnopqrstuvwxyz0123456789"),
+        description="Search terms used to enumerate the Cinetixx booking cinema index",
     )
     cinetixx_sync_show_days: int = Field(
         default=7,
@@ -166,7 +182,12 @@ class Settings(BaseSettings):
     def _parse_int_list(cls, value: Any) -> list[int]:
         return [int(item) for item in _parse_list_value(value)]
 
-    @field_validator("cinetixx_sync_discovery_searches", "kinoheld_sync_cinema_ids", mode="before")
+    @field_validator(
+        "cinetixx_sync_discovery_searches",
+        "cinetixx_discovery_terms",
+        "kinoheld_sync_cinema_ids",
+        mode="before",
+    )
     @classmethod
     def _parse_string_list(cls, value: Any) -> list[str]:
         return [str(item).strip() for item in _parse_list_value(value) if str(item).strip()]

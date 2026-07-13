@@ -951,7 +951,7 @@ Example response:
 
 These routes derive Kinoheld-like read-only resources from the legacy show-info/program payload. They only contain fields Cinetixx exposes in the payload for the requested `mandatorId`; use `/cinetixx/show-info` if you need the unmodified source body.
 
-If `mandatorId` is omitted, the live routes use configured `CINETIXX_SYNC_MANDATOR_IDS`. If that list is empty, they return an empty list.
+If `mandatorId` is omitted, the live routes enumerate mandators from Cinetixx's public booking search and aggregate their programme data. Cinetixx does not expose an unauthenticated all-cinemas directory: Kinova searches its built-in `a-z`/`0-9` index terms and de-duplicates the results. This can be substantially slower than a single-mandator request; use the internal cache routes for normal application traffic.
 
 | Method | Route | Description |
 |--------|-------|-------------|
@@ -968,7 +968,7 @@ Common query parameters:
 
 | Parameter | Routes | Description |
 |-----------|--------|-------------|
-| `mandatorId` | all | Optional Cinetixx mandator ID. Required unless sync IDs are configured. |
+| `mandatorId` | all | Optional Cinetixx mandator ID. Omit it to aggregate all discovered mandators. |
 | `search` | list routes | Free-text filter where supported |
 | `limit` | list routes | Max results, default `100`, max `1000` |
 | `date`, `days` | `/cinetixx/shows` | Date window for shows |
@@ -992,14 +992,17 @@ curl "http://localhost:8000/api/v1/internal/cinetixx/shows?mandatorId=1234"
 curl "http://localhost:8000/api/v1/internal/cinetixx/movies?mandatorId=1234"
 ```
 
-The cache refreshes periodically from `CINETIXX_SYNC_MANDATOR_IDS`. If an internal request includes a `mandatorId` that is not cached yet, Kinova fetches and stores it on demand.
+The cache refreshes periodically by enumerating the public Cinetixx booking search and fetching every discovered mandator. It logs each discovery term/page and `current/total` mandator fetch progress. If an internal request includes a `mandatorId` that is not cached yet, Kinova fetches and stores it on demand.
 
-The cache can also rediscover mandators periodically from
-`CINETIXX_SYNC_DISCOVERY_SEARCHES`. Use specific cinema names rather than broad
-city searches when you enable this, because each discovered mandator is
-pre-fetched during refresh. List-style env values accept JSON arrays or
-comma-separated strings, for example `CINETIXX_SYNC_DISCOVERY_SEARCHES=ACUDkino`
-or `CINETIXX_SYNC_MANDATOR_IDS=1627457285,42`.
+`CINETIXX_SYNC_MANDATOR_IDS` and `CINETIXX_SYNC_DISCOVERY_SEARCHES` are optional
+additive seeds, for operators that are absent from the public index. Both accept
+JSON arrays or comma-separated values, for example
+`CINETIXX_SYNC_DISCOVERY_SEARCHES=ACUDkino` or
+`CINETIXX_SYNC_MANDATOR_IDS=1627457285,42`. Discovery paging is controlled by
+`CINETIXX_DISCOVERY_PAGE_SIZE` (default `100`) and the safety limit
+`CINETIXX_DISCOVERY_MAX_PAGES` (default `100`). `CINETIXX_DISCOVERY_TERMS` can
+override the default `a-z`/`0-9` search terms if Cinetixx adds cinemas whose
+searchable fields do not contain those characters.
 
 ## Unified Internal Layer
 

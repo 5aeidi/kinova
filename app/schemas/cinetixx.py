@@ -53,6 +53,7 @@ class CinetixxMandator(BaseModel):
     pretty_program_url: str | None = Field(default=None, alias="prettyProgramUrl")
     gift_cards_url: str | None = Field(default=None, alias="giftCardsUrl")
     card_balance_url: str | None = Field(default=None, alias="cardBalanceUrl")
+    special_event_image_url: str | None = Field(default=None, alias="specialEventImageUrl")
 
 
 class CinetixxPrice(BaseModel):
@@ -80,6 +81,14 @@ class CinetixxCinema(BaseModel):
     city: str | None = None
     region_id: str | None = Field(default=None, alias="regionId")
     region: str | None = None
+    address: str | None = None
+    post_code: str | None = Field(default=None, alias="postCode")
+    phone: str | None = None
+    latitude: float | None = None
+    longitude: float | None = None
+    program_url: str | None = Field(default=None, alias="programUrl")
+    pretty_program_url: str | None = Field(default=None, alias="prettyProgramUrl")
+    special_event_image_url: str | None = Field(default=None, alias="specialEventImageUrl")
 
 
 class CinetixxCity(BaseModel):

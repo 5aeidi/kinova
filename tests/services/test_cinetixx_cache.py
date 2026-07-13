@@ -72,6 +72,7 @@ class TestCinetixxCache:
     async def test_refresh_discovers_configured_searches(self, monkeypatch):
         monkeypatch.setattr(settings, "cinetixx_sync_discovery_searches", ["acud"])
         monkeypatch.setattr(settings, "cinetixx_sync_mandator_ids", [])
+        monkeypatch.setattr(settings, "cinetixx_discovery_terms", ["a"])
         client = AsyncMock()
         client.search_cinemas.return_value = {
             "searchList": [{"searchObject": SAMPLE_DISCOVERY}],
@@ -90,5 +91,5 @@ class TestCinetixxCache:
         assert snapshot["discovered_mandators"] == 1
         assert snapshot["mandators"] == [1627457285]
         assert discovered[0].mandator_id == 1627457285
-        client.search_cinemas.assert_awaited_once()
+        assert client.search_cinemas.await_count == 2
         client.get_show_info.assert_awaited_once_with(1627457285)

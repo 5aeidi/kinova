@@ -55,24 +55,23 @@ class CinetixxCache:
             }
 
         mandators = await self._refresh_discovered_mandators(service, existing_mandators)
-        if (
-            not settings.cinetixx_sync_mandator_ids
-            and not settings.cinetixx_sync_discovery_searches
-            and not existing_datasets
-        ):
-            logger.info(
-                "No Cinetixx sync seed configured; set CINETIXX_SYNC_MANDATOR_IDS or "
-                "CINETIXX_SYNC_DISCOVERY_SEARCHES to pre-fill the cache",
-            )
-
         mandator_ids = sorted(
             set(settings.cinetixx_sync_mandator_ids)
             | {item.mandator_id for item in mandators.values()}
             | set(existing_datasets.keys()),
         )
+        mandators_by_id = {item.mandator_id: item for item in mandators.values()}
         payloads: dict[int, CinetixxShowInfo] = {}
         datasets: dict[int, CinetixxDataset] = {}
-        for mandator_id in mandator_ids:
+        total = len(mandator_ids)
+        logger.info("Cinetixx cache refresh fetching %d mandators", total)
+        for position, mandator_id in enumerate(mandator_ids, start=1):
+            logger.info(
+                "Cinetixx cache refresh progress: %d/%d (mandator %s)",
+                position,
+                total,
+                mandator_id,
+            )
             try:
                 show_info = await service.get_show_info_by_mandator(mandator_id)
             except Exception:  # pragma: no cover - defensive
@@ -83,7 +82,10 @@ class CinetixxCache:
                 continue
 
             payloads[mandator_id] = show_info
-            datasets[mandator_id] = service.normalize_show_info(show_info)
+            datasets[mandator_id] = service._normalize_and_enrich(
+                show_info,
+                mandators_by_id.get(mandator_id),
+            )
 
         async with self._lock:
             self._payloads = payloads
@@ -107,11 +109,16 @@ class CinetixxCache:
         service: CinetixxService,
         existing_mandators: dict[str, CinetixxMandator],
     ) -> dict[str, CinetixxMandator]:
-        """Refresh configured cinema-search discoveries, preserving stale data on failure."""
-        if not settings.cinetixx_sync_discovery_searches:
-            return existing_mandators
-
+        """Discover all booking cinemas, preserving stale data if discovery fails."""
         mandators: dict[str, CinetixxMandator] = {}
+        try:
+            discovered = await service.discover_all_mandators()
+        except Exception:  # pragma: no cover - defensive
+            logger.exception("Failed to discover Cinetixx mandators from the booking index")
+            mandators.update(existing_mandators)
+        else:
+            mandators.update({item.cinema_id: item for item in discovered})
+
         for search in settings.cinetixx_sync_discovery_searches:
             try:
                 discovered = await service.discover_mandators(
@@ -128,7 +135,12 @@ class CinetixxCache:
     async def cache_mandator(self, service: CinetixxService, mandator_id: int) -> None:
         """Fetch and cache one Cinetixx mandator on demand."""
         show_info = await service.get_show_info_by_mandator(mandator_id)
-        dataset = service.normalize_show_info(show_info)
+        async with self._lock:
+            mandator = next(
+                (item for item in self._mandators.values() if item.mandator_id == mandator_id),
+                None,
+            )
+        dataset = service._normalize_and_enrich(show_info, mandator)
 
         async with self._lock:
             self._payloads[mandator_id] = show_info

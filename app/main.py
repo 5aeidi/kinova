@@ -38,6 +38,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     sync_task: asyncio.Task[None] | None = None
     cinetixx_sync_task: asyncio.Task[None] | None = None
+    cinetixx_initial_refresh_task: asyncio.Task[None] | None = None
     client: GraphQLClient | None = None
     cinetixx_client: CinetixxClient | None = None
 
@@ -52,9 +53,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.info("Performing initial Kinoheld cache refresh")
         with contextlib.suppress(Exception):
             await cache.refresh(service)
-        logger.info("Performing initial Cinetixx cache refresh")
-        with contextlib.suppress(Exception):
-            await cinetixx_cache.refresh(cinetixx_service)
+        logger.info("Scheduling initial Cinetixx cache refresh in the background")
+        cinetixx_initial_refresh_task = asyncio.create_task(
+            cinetixx_cache.refresh(cinetixx_service),
+            name="cinetixx-initial-cache-refresh",
+        )
 
         sync_task = asyncio.create_task(
             run_periodic_sync(cache, service, settings.kinoheld_sync_interval_seconds),
@@ -76,6 +79,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             cinetixx_sync_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await cinetixx_sync_task
+        if cinetixx_initial_refresh_task is not None:
+            cinetixx_initial_refresh_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await cinetixx_initial_refresh_task
         if client is not None:
             await client.close()
         if cinetixx_client is not None:

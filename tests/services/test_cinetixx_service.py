@@ -1,9 +1,10 @@
 """Tests for the Cinetixx service layer."""
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, call
 
 import pytest
 
+from app.core.config import settings
 from app.schemas.cinetixx import (
     CinetixxMandatorSearchParams,
     CinetixxMovieSearchParams,
@@ -169,6 +170,27 @@ class TestGetShowInfo:
 
 @pytest.mark.asyncio
 class TestDiscoverMandators:
+    async def test_discovers_all_mandators_from_unfiltered_paginated_index(self, monkeypatch):
+        monkeypatch.setattr(settings, "cinetixx_discovery_page_size", 1)
+        monkeypatch.setattr(settings, "cinetixx_discovery_terms", ["a"])
+        client = AsyncMock()
+        second = {**SAMPLE_DISCOVERY, "id": "second", "mandatorId": 43}
+        client.search_cinemas.side_effect = [
+            {"searchList": [{"searchObject": SAMPLE_DISCOVERY}]},
+            {"searchList": [{"searchObject": second}]},
+            {"searchList": []},
+        ]
+        service = CinetixxService(client)
+
+        result = await service.discover_all_mandators()
+
+        assert [item.mandator_id for item in result] == [1627457285, 43]
+        assert client.search_cinemas.await_args_list == [
+            call(search="a", page=1, page_size=1),
+            call(search="a", page=2, page_size=1),
+            call(search="a", page=3, page_size=1),
+        ]
+
     async def test_discovers_mandators_from_search_objects(self):
         client = AsyncMock()
         client.search_cinemas.return_value = {"searchList": [{"searchObject": SAMPLE_DISCOVERY}]}
@@ -218,6 +240,21 @@ class TestNormalizeShowInfo:
         assert dataset.movies[0].id == "456"
         assert dataset.movies[0].title == "Dune"
         assert dataset.movies[0].genres == ["Science Fiction", "Action", "Sci-Fi", "Event"]
+
+    def test_enriches_cinema_with_booking_index_metadata(self):
+        service = CinetixxService(AsyncMock())
+        row = {**SAMPLE_ROW, "mandatorId": 1627457285}
+        show_info = CinetixxShowInfo(mandatorId=1627457285, data={"shows": [row]})
+        mandator = service._payload_to_mandator(SAMPLE_DISCOVERY)
+
+        dataset = service.enrich_dataset(service.normalize_show_info(show_info), mandator)
+
+        cinema = dataset.cinemas[0]
+        assert cinema.address == "Veteranenstr. 21, 10119 Berlin"
+        assert cinema.post_code == "10119"
+        assert cinema.latitude == 52.533608
+        assert cinema.longitude == 13.40086
+        assert cinema.pretty_program_url.endswith("acudkino+gmbh-berlin")
         assert dataset.shows[0].id == "123"
         assert dataset.shows[0].date.isoformat() == "2026-07-13"
         assert dataset.shows[0].prices[0].category == "Adult"

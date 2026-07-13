@@ -9,7 +9,7 @@ from app.schemas.cinetixx import (
     CinetixxShow,
 )
 from app.schemas.city import City
-from app.schemas.common import Image, Url
+from app.schemas.common import Geo, Image, Url
 from app.schemas.movie import Genre, Movie, Person
 from app.schemas.show import Auditorium, DateTimeFormatted, Show, ShowFlag
 from app.schemas.unified import UnifiedCinema, UnifiedCity, UnifiedGenre, UnifiedMovie, UnifiedShow
@@ -91,6 +91,17 @@ def cinetixx_cinema_to_unified(cinema: CinetixxCinema) -> UnifiedCinema:
         id=cinema.id,
         name=cinema.name or cinema.id,
         city=CitySummary(id=cinema.city_id, name=cinema.city),
+        street=cinema.address,
+        postcode=cinema.post_code,
+        phonenumber=cinema.phone,
+        coordinates=(
+            Geo(latitude=cinema.latitude, longitude=cinema.longitude)
+            if cinema.latitude is not None and cinema.longitude is not None
+            else None
+        ),
+        detailUrl=_url(cinema.pretty_program_url or cinema.program_url),
+        thumbnail=_image(cinema.special_event_image_url),
+        heroImage=_image(cinema.special_event_image_url),
     ).model_dump(by_alias=True)
     return UnifiedCinema(
         **payload,

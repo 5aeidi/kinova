@@ -8,12 +8,14 @@ import pytest
 
 from app.main import create_application
 from app.schemas.cinema import Cinema, CitySummary
+from app.schemas.cinetixx import CinetixxCinema
 from app.schemas.city import City
 from app.schemas.movie import Genre, Movie
 from app.schemas.show import DateTimeFormatted, Show
 from app.services.cache import KinoheldCache
 from app.services.cinetixx import CinetixxService
 from app.services.cinetixx_cache import CinetixxCache
+from app.services.unified import cinetixx_cinema_to_unified
 from tests.services.test_cinetixx_service import SAMPLE_ROW
 
 
@@ -75,6 +77,22 @@ def app_with_unified_caches():
 
 @pytest.mark.asyncio
 class TestInternalUnified:
+    def test_cinetixx_cinema_includes_discovered_location(self):
+        cinema = cinetixx_cinema_to_unified(
+            CinetixxCinema(
+                id="c1",
+                mandatorId=42,
+                name="Cinema",
+                address="Example Street 1",
+                postCode="10119",
+                latitude=52.5,
+                longitude=13.4,
+            ),
+        )
+
+        assert cinema.coordinates.model_dump() == {"latitude": 52.5, "longitude": 13.4}
+        assert cinema.street == "Example Street 1"
+
     async def test_movies_include_source_tags(self, app_with_unified_caches):
         app, _ = app_with_unified_caches
 
