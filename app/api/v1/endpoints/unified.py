@@ -5,7 +5,12 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 
-from app.api.deps import get_cinetixx_cache, get_cinetixx_cached_service, get_kinoheld_cache
+from app.api.deps import (
+    get_cinetixx_cache,
+    get_cinetixx_cached_service,
+    get_kinoheld_cache,
+    get_kinoheld_cached_service,
+)
 from app.core.config import settings
 from app.schemas.cinema import CinemaSearchParams
 from app.schemas.cinetixx import (
@@ -22,6 +27,7 @@ from app.schemas.unified import UnifiedCinema, UnifiedCity, UnifiedGenre, Unifie
 from app.services.cache import KinoheldCache
 from app.services.cinetixx import CinetixxService
 from app.services.cinetixx_cache import CinetixxCache
+from app.services.kinoheld import KinoheldService
 from app.services.unified import (
     cinetixx_cinema_to_unified,
     cinetixx_city_to_unified,
@@ -38,6 +44,7 @@ from app.services.unified import (
 router = APIRouter(prefix="/internal/unified", tags=["internal", "unified"])
 
 KinoheldCacheDep = Annotated[KinoheldCache, Depends(get_kinoheld_cache)]
+KinoheldServiceDep = Annotated[KinoheldService, Depends(get_kinoheld_cached_service)]
 CinetixxCacheDep = Annotated[CinetixxCache, Depends(get_cinetixx_cache)]
 CinetixxServiceDep = Annotated[CinetixxService, Depends(get_cinetixx_cached_service)]
 
@@ -79,6 +86,23 @@ async def _ensure_cinetixx_cached(
         await cache.refresh(service)
 
 
+async def _ensure_kinoheld_location_cached(
+    cache: KinoheldCache,
+    service: KinoheldService,
+    params: CinemaSearchParams,
+) -> None:
+    """Backfill a location's full live cinema list, mirroring /internal/cinemas.
+
+    Without this the unified view serves only the globally capped refresh slice for
+    the requested location, silently under-reporting Kinoheld cinemas.
+    """
+    if not params.location or await cache.is_location_backfilled(params.location):
+        return
+    backfill = params.model_copy(update={"limit": 1000})
+    with contextlib.suppress(Exception):
+        await cache.add_cinemas(await service.search_cinemas(backfill), params.location)
+
+
 def _sort_by_name(items):
     return sorted(
         items,
@@ -103,6 +127,7 @@ def _sort_shows(items: list[UnifiedShow]) -> list[UnifiedShow]:
 async def list_unified_cinemas(
     params: Annotated[CinemaSearchParams, Depends()],
     kinoheld_cache: KinoheldCacheDep,
+    kinoheld_service: KinoheldServiceDep,
     cinetixx_cache: CinetixxCacheDep,
     cinetixx_service: CinetixxServiceDep,
     source: Annotated[str | None, Query(description="Optional source tag filter")] = None,
@@ -114,6 +139,7 @@ async def list_unified_cinemas(
 
     results: list[UnifiedCinema] = []
     if "kinoheld" in sources:
+        await _ensure_kinoheld_location_cached(kinoheld_cache, kinoheld_service, params)
         results.extend(
             kinoheld_cinema_to_unified(item) for item in await kinoheld_cache.search_cinemas(params)
         )

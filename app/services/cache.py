@@ -94,6 +94,10 @@ class KinoheldCache:
         self._cities: list[City] = []
         self._genres: list[Genre] = []
         self._last_refresh: dt.datetime | None = None
+        # Locations whose full live cinema list has been merged in since the last
+        # refresh. The periodic refresh only fetches a globally capped slice, so a
+        # location query can be served a partial list without this backfill.
+        self._backfilled_locations: set[str] = set()
 
     # ------------------------------------------------------------------
     # Refresh
@@ -128,6 +132,7 @@ class KinoheldCache:
 
         async with self._lock:
             self._cinemas = cinemas
+            self._backfilled_locations.clear()
             self._movies = movies
             # Merge so on-demand entries cached via cache_shows_for_cinema survive
             # periodic refreshes (which only cover the configured sync cinemas).
@@ -191,11 +196,22 @@ class KinoheldCache:
                     return cinema
         raise KinoheldNotFoundError(f"Cinema {cinema_id} not found")
 
-    async def add_cinemas(self, cinemas: list[Cinema]) -> None:
-        """Merge new cinemas into the cache, avoiding duplicates by ID."""
+    async def add_cinemas(self, cinemas: list[Cinema], location: str | None = None) -> None:
+        """Merge new cinemas into the cache, avoiding duplicates by ID.
+
+        Passing ``location`` records that this location's live list has been merged in,
+        so subsequent queries for it are served from the cache alone.
+        """
         async with self._lock:
             existing_ids = {c.id for c in self._cinemas}
             self._cinemas.extend([c for c in cinemas if c.id not in existing_ids])
+            if location:
+                self._backfilled_locations.add(location.casefold())
+
+    async def is_location_backfilled(self, location: str) -> bool:
+        """Return whether this location's full live cinema list is already cached."""
+        async with self._lock:
+            return location.casefold() in self._backfilled_locations
 
     # ------------------------------------------------------------------
     # Movies
