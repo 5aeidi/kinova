@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import logging
+import re
 from collections.abc import Iterable
 from typing import Any
 
@@ -17,6 +18,46 @@ from app.schemas.show import Show, ShowSearchParams
 from app.services.kinoheld import KinoheldService
 
 logger = logging.getLogger(__name__)
+
+
+_TRAILING_PARENS_RE = re.compile(r"\s*\([^)]*\)\s*$")
+
+
+def _normalize_title(title: str) -> str:
+    """Normalize a movie title for cross-record matching.
+
+    Show-embedded movies carry version suffixes ("Die Odyssee (OmU)") that the
+    catalog record ("Die Odyssee") lacks; strip trailing parentheticals.
+    """
+    normalized = title.strip()
+    while True:
+        stripped = _TRAILING_PARENS_RE.sub("", normalized)
+        if stripped == normalized:
+            break
+        normalized = stripped
+    return normalized.casefold()
+
+
+def _enrich_show_genres(shows: Iterable[Show], movies: Iterable[Movie]) -> None:
+    """Backfill empty show-embedded genres from the movie catalog by title.
+
+    Kinoheld's show query returns placeholder genres ({"id": null, "name": ""})
+    for the per-version movie records embedded in shows, while the catalog query
+    has real genre data for the same films.
+    """
+    catalog_genres = {
+        _normalize_title(movie.title): movie.genres
+        for movie in movies
+        if movie.title and movie.genres and any(g.name for g in movie.genres)
+    }
+    for show in shows:
+        movie = show.movie
+        if movie is None:
+            continue
+        genres = [g for g in (movie.genres or []) if g.name]
+        if not genres and movie.title:
+            genres = catalog_genres.get(_normalize_title(movie.title), [])
+        movie.genres = list(genres)
 
 
 def _matches(value: str | None, query: str | None) -> bool:
@@ -82,10 +123,16 @@ class KinoheldCache:
                     day_shows = []
                 shows[f"{cinema_id}::{date}"] = day_shows
 
+        for day_shows in shows.values():
+            _enrich_show_genres(day_shows, movies)
+
         async with self._lock:
             self._cinemas = cinemas
             self._movies = movies
-            self._shows = shows
+            # Merge so on-demand entries cached via cache_shows_for_cinema survive
+            # periodic refreshes (which only cover the configured sync cinemas).
+            self._shows.update(shows)
+            self._prune_stale_shows()
             self._cities = cities
             self._genres = genres
             self._last_refresh = dt.datetime.now(tz=dt.timezone.utc)
@@ -116,7 +163,8 @@ class KinoheldCache:
             # Match Kinoheld's default 50 km radius when no explicit distance is given.
             if distance is None:
                 distance = 50
-            cinemas = self._filter_by_location(cinemas, location, distance)
+            async with self._lock:
+                cinemas = self._filter_by_location(cinemas, location, distance)
 
         results = [
             cinema
@@ -168,8 +216,8 @@ class KinoheldCache:
             # back to returning an empty list for location+distance queries.
             async with self._lock:
                 nearby_cinemas = self._filter_by_location(list(self._cinemas), location, distance)
-            nearby_ids = {c.id for c in nearby_cinemas}
-            movies = self._filter_movies_by_cinemas(movies, nearby_ids)
+                nearby_ids = {c.id for c in nearby_cinemas}
+                movies = self._filter_movies_by_cinemas(movies, nearby_ids)
         elif location:
             # Same approximation, but match cinemas whose city name contains the location.
             async with self._lock:
@@ -178,8 +226,8 @@ class KinoheldCache:
                     for cinema in self._cinemas
                     if _matches(cinema.city.name if cinema.city else None, location)
                 ]
-            matching_ids = {c.id for c in matching_cinemas}
-            movies = self._filter_movies_by_cinemas(movies, matching_ids)
+                matching_ids = {c.id for c in matching_cinemas}
+                movies = self._filter_movies_by_cinemas(movies, matching_ids)
 
         if query:
             movies = [m for m in movies if _matches(m.title, query)]
@@ -188,7 +236,8 @@ class KinoheldCache:
             # The cache stores a generic set of movies; we cannot reliably determine playing
             # status without show data. As a pragmatic fallback we keep movies that have at
             # least one cached future show when playing is NOW/FUTURE.
-            movies = self._filter_movies_by_playing(movies, params.playing)
+            async with self._lock:
+                movies = self._filter_movies_by_playing(movies, params.playing)
 
         return movies[:limit]
 
@@ -242,9 +291,14 @@ class KinoheldCache:
         fetched: dict[str, list[Show]] = {}
         for date_str in dates:
             params = ShowSearchParams(cinema_id=cinema_id, date=dt.date.fromisoformat(date_str))
-            fetched[f"{cinema_id}::{date_str}"] = await service.search_shows(params)
+            try:
+                fetched[f"{cinema_id}::{date_str}"] = await service.search_shows(params)
+            except Exception:
+                logger.exception("Failed to fetch shows for cinema %s on %s", cinema_id, date_str)
 
         async with self._lock:
+            for day_shows in fetched.values():
+                _enrich_show_genres(day_shows, self._movies)
             self._shows.update(fetched)
 
     async def has_any_shows(self, cinema_id: str) -> bool:
@@ -269,6 +323,38 @@ class KinoheldCache:
             cities = list(self._cities)
 
         results = [c for c in cities if _matches(c.name, params.search)]
+
+        if params.location:
+            centre = next(
+                (
+                    c.coordinates
+                    for c in cities
+                    if _matches(c.name, params.location)
+                    and c.coordinates
+                    and c.coordinates.latitude is not None
+                    and c.coordinates.longitude is not None
+                ),
+                None,
+            )
+            if centre is not None:
+                max_distance = params.distance if params.distance is not None else 50
+                results = [
+                    c
+                    for c in results
+                    if c.coordinates
+                    and c.coordinates.latitude is not None
+                    and c.coordinates.longitude is not None
+                    and _haversine_km(
+                        centre.latitude,
+                        centre.longitude,
+                        c.coordinates.latitude,
+                        c.coordinates.longitude,
+                    )
+                    <= max_distance
+                ]
+            else:
+                results = [c for c in results if _matches(c.name, params.location)]
+
         return results[: params.limit]
 
     async def get_city(self, city_id: str) -> City:
@@ -362,6 +448,13 @@ class KinoheldCache:
 
         # UPCOMING: movies not yet having any cached show.
         return [m for m in movies if m.id not in movie_ids_with_future_shows]
+
+    def _prune_stale_shows(self) -> None:
+        """Drop cached show entries for past dates. Caller must hold the lock."""
+        today = dt.date.today().isoformat()
+        stale = [key for key in self._shows if key.split("::", 1)[-1] < today]
+        for key in stale:
+            del self._shows[key]
 
     def snapshot(self) -> dict[str, Any]:
         """Return a debug snapshot of current cache contents."""

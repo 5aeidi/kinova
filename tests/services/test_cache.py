@@ -9,7 +9,7 @@ from app.core.exceptions import KinoheldNotFoundError
 from app.schemas.cinema import Cinema, CinemaSearchParams, CitySummary
 from app.schemas.city import City, CitySearchParams
 from app.schemas.common import Geo
-from app.schemas.movie import Movie, MovieSearchParams
+from app.schemas.movie import Genre, Movie, MovieSearchParams
 from app.schemas.show import Show, ShowSearchParams
 from app.services.cache import KinoheldCache
 from app.services.kinoheld import KinoheldService
@@ -217,3 +217,113 @@ class TestSearchCities:
         results = await cache.search_cities(CitySearchParams(search="ber", limit=10))
 
         assert [c.id for c in results] == ["1"]
+
+    async def test_location_filters_by_distance(self, cache: KinoheldCache):
+        cache._cities = [
+            City(id="1", name="Berlin", coordinates=Geo(latitude=52.52, longitude=13.405)),
+            City(id="2", name="Potsdam", coordinates=Geo(latitude=52.39, longitude=13.06)),
+            City(id="3", name="Munich", coordinates=Geo(latitude=48.14, longitude=11.58)),
+        ]
+
+        results = await cache.search_cities(CitySearchParams(location="Berlin", limit=10))
+
+        assert {c.id for c in results} == {"1", "2"}
+
+    async def test_location_falls_back_to_name_match(self, cache: KinoheldCache):
+        cache._cities = [City(id="1", name="Berlin"), City(id="2", name="Munich")]
+
+        results = await cache.search_cities(CitySearchParams(location="Berlin", limit=10))
+
+        assert [c.id for c in results] == ["1"]
+
+
+@pytest.mark.asyncio
+class TestOnDemandShows:
+    async def test_refresh_keeps_on_demand_shows(
+        self,
+        cache: KinoheldCache,
+        mock_service: AsyncMock,
+    ):
+        future = (dt.date.today() + dt.timedelta(days=1)).isoformat()
+        cache._shows = {f"c9::{future}": [Show(id="s1", name="Show")]}
+        mock_service.search_cinemas.return_value = []
+        mock_service.search_movies.return_value = []
+        mock_service.search_cities.return_value = []
+        mock_service.list_genres.return_value = []
+
+        await cache.refresh(mock_service)
+
+        assert f"c9::{future}" in cache._shows
+
+    async def test_refresh_prunes_past_show_dates(
+        self,
+        cache: KinoheldCache,
+        mock_service: AsyncMock,
+    ):
+        past = (dt.date.today() - dt.timedelta(days=2)).isoformat()
+        cache._shows = {f"c9::{past}": [Show(id="s1", name="Show")]}
+        mock_service.search_cinemas.return_value = []
+        mock_service.search_movies.return_value = []
+        mock_service.search_cities.return_value = []
+        mock_service.list_genres.return_value = []
+
+        await cache.refresh(mock_service)
+
+        assert cache._shows == {}
+
+    async def test_cache_shows_for_cinema_survives_a_failing_date(
+        self,
+        cache: KinoheldCache,
+        mock_service: AsyncMock,
+    ):
+        good_show = Show(id="s1", name="Show")
+        mock_service.search_shows.side_effect = [RuntimeError("boom"), [good_show]]
+
+        await cache.cache_shows_for_cinema(mock_service, "c1", ["2026-07-25", "2026-07-26"])
+
+        assert "c1::2026-07-25" not in cache._shows
+        assert cache._shows["c1::2026-07-26"] == [good_show]
+
+
+@pytest.mark.asyncio
+class TestGenreEnrichment:
+    async def test_show_embedded_genres_backfilled_from_catalog(
+        self,
+        cache: KinoheldCache,
+        mock_service: AsyncMock,
+    ):
+        cache._movies = [
+            Movie(id="99", title="Die Odyssee", genres=[Genre(id="5", name="Drama")]),
+        ]
+        show = Show(
+            id="s1",
+            name="Die Odyssee (OmU)",
+            movie=Movie(id="426501", title="Die Odyssee (OmU)", genres=[Genre(name="")]),
+        )
+        mock_service.search_shows.return_value = [show]
+
+        await cache.cache_shows_for_cinema(mock_service, "c1", ["2026-07-26"])
+
+        cached = cache._shows["c1::2026-07-26"][0]
+        assert [g.name for g in cached.movie.genres] == ["Drama"]
+
+    async def test_real_genres_kept_and_blanks_dropped(
+        self,
+        cache: KinoheldCache,
+        mock_service: AsyncMock,
+    ):
+        show = Show(
+            id="s1",
+            name="Obsession (OmU)",
+            movie=Movie(
+                id="1",
+                title="Obsession (OmU)",
+                genres=[Genre(name="Horrorfilm"), Genre(name="")],
+            ),
+        )
+        mock_service.search_shows.return_value = [show]
+
+        await cache.cache_shows_for_cinema(mock_service, "c1", ["2026-07-26"])
+
+        cached = cache._shows["c1::2026-07-26"][0]
+        assert [g.name for g in cached.movie.genres] == ["Horrorfilm"]

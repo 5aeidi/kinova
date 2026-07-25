@@ -35,6 +35,26 @@ class NaturalLanguageQuery(BaseModel):
     limit: int = Field(default=20, ge=1, le=100)
 
 
+def _normalise_relative_date(value: str | None) -> str | None:
+    """Normalise relative/localised date terms to an ISO date string."""
+    if value is None:
+        return None
+    value_lower = value.strip().lower()
+    today = dt.date.today()
+    if value_lower in {"today", "heute"}:
+        return today.isoformat()
+    if value_lower in {"tomorrow", "morgen"}:
+        return (today + dt.timedelta(days=1)).isoformat()
+    # Try to parse a few common formats.
+    for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%m/%d/%Y", "%d/%m/%Y"):
+        try:
+            return dt.datetime.strptime(value, fmt).date().isoformat()
+        except ValueError:
+            continue
+    # Return as-is if not parsed; downstream code will ignore invalid dates.
+    return value
+
+
 class ParsedIntent(BaseModel):
     """Structured intent extracted from a natural-language prompt."""
 
@@ -117,22 +137,7 @@ class ParsedIntent(BaseModel):
     @field_validator("date")
     @classmethod
     def _normalise_relative_date(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        value_lower = value.strip().lower()
-        today = dt.date.today()
-        if value_lower in {"today", "heute"}:
-            return today.isoformat()
-        if value_lower in {"tomorrow", "morgen"}:
-            return (today + dt.timedelta(days=1)).isoformat()
-        # Try to parse a few common formats.
-        for fmt in ("%Y-%m-%d", "%d.%m.%Y", "%m/%d/%Y", "%d/%m/%Y"):
-            try:
-                return dt.datetime.strptime(value, fmt).date().isoformat()
-            except ValueError:
-                continue
-        # Return as-is if not parsed; downstream code will ignore invalid dates.
-        return value
+        return _normalise_relative_date(value)
 
 
 class StructuredSearchQuery(BaseModel):
@@ -218,7 +223,10 @@ class StructuredSearchQuery(BaseModel):
     )
     limit: int = Field(default=20, ge=1, le=100)
 
-    _normalise_date = field_validator("date")(ParsedIntent._normalise_relative_date)
+    @field_validator("date")
+    @classmethod
+    def _normalise_date(cls, value: str | None) -> str | None:
+        return _normalise_relative_date(value)
 
 
 class SearchResult(BaseModel):

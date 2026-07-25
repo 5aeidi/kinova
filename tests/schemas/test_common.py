@@ -45,3 +45,8 @@ class TestUrlModel:
     def test_accepts_url_string(self):
         url = Url.model_validate({"url": "https://example.com/page"})
         assert str(url.url) == "https://example.com/page"
+
+    @pytest.mark.parametrize("value", ["", "   "])
+    def test_blank_url_coerced_to_none(self, value):
+        assert Url.model_validate({"url": value}).url is None
+        assert Image.model_validate({"url": value}).url is None

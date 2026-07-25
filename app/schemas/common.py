@@ -2,7 +2,7 @@
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, field_validator
 
 
 class Url(BaseModel):
@@ -12,6 +12,14 @@ class Url(BaseModel):
 
     url: HttpUrl | None = None
 
+    @field_validator("url", mode="before")
+    @classmethod
+    def _blank_url_to_none(cls, value: Any) -> Any:
+        # Kinoheld returns "" instead of null for missing URLs on show-embedded movies.
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
 
 class Image(BaseModel):
     """Kinoheld image asset."""
@@ -20,6 +28,13 @@ class Image(BaseModel):
 
     url: HttpUrl | None = None
     alt: str | None = None
+
+    @field_validator("url", mode="before")
+    @classmethod
+    def _blank_url_to_none(cls, value: Any) -> Any:
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
 
 class Geo(BaseModel):
