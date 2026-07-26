@@ -136,6 +136,15 @@ class Settings(BaseSettings):
         le=500,
         description="Max movies to fetch per cache refresh",
     )
+    kinoheld_genre_lookup_limit: int = Field(
+        default=25,
+        ge=0,
+        le=200,
+        description=(
+            "Max live movie lookups per show batch used to backfill show-embedded "
+            "genres for films outside the cached catalog slice"
+        ),
+    )
     kinoheld_sync_cinema_limit: int = Field(
         default=1000,
         ge=1,

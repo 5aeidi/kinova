@@ -65,7 +65,11 @@ class CinetixxCache:
             | {item.mandator_id for item in mandators.values()}
             | set(existing_datasets.keys()),
         )
-        mandators_by_id = {item.mandator_id: item for item in mandators.values()}
+        # Group every booking-index record by mandator; one operator runs many venues
+        # and each carries its own address and coordinates.
+        mandators_by_id: dict[int, list[CinetixxMandator]] = {}
+        for item in mandators.values():
+            mandators_by_id.setdefault(item.mandator_id, []).append(item)
         payloads: dict[int, CinetixxShowInfo] = {}
         datasets: dict[int, CinetixxDataset] = {}
         total = len(mandator_ids)
@@ -142,11 +146,10 @@ class CinetixxCache:
         """Fetch and cache one Cinetixx mandator on demand."""
         show_info = await service.get_show_info_by_mandator(mandator_id)
         async with self._lock:
-            mandator = next(
-                (item for item in self._mandators.values() if item.mandator_id == mandator_id),
-                None,
-            )
-        dataset = service._normalize_and_enrich(show_info, mandator)
+            venues = [
+                item for item in self._mandators.values() if item.mandator_id == mandator_id
+            ]
+        dataset = service._normalize_and_enrich(show_info, venues)
 
         async with self._lock:
             self._payloads[mandator_id] = show_info
