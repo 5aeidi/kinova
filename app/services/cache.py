@@ -178,12 +178,43 @@ class KinoheldCache:
     # ------------------------------------------------------------------
     # Refresh
     # ------------------------------------------------------------------
-    def _cinemas_to_prefetch(self, cinemas: list[Cinema]) -> list[str]:
-        """Cinema IDs to pre-fetch shows for: explicit IDs plus the first N cached.
+    async def _priority_cinemas(
+        self,
+        service: KinoheldService,
+    ) -> tuple[list[Cinema], set[str]]:
+        """Fetch the full cinema list for each priority location, in order.
 
-        Relying on ``kinoheld_sync_cinema_ids`` alone means an unset list silently
-        leaves the show cache empty, which is invisible until someone notices
-        ``cached_shows`` reading 0.
+        The global refresh slice is not ordered by relevance, so without this the
+        pre-warm budget lands on whichever cinemas the catalogue happens to list
+        first — rarely the ones anybody is querying.
+
+        Returns the cinemas and the locations that were fetched successfully; a
+        location whose fetch failed must not be recorded as backfilled.
+        """
+        found: list[Cinema] = []
+        seen: set[str] = set()
+        fetched: set[str] = set()
+        for location in settings.kinoheld_sync_priority_locations:
+            try:
+                cinemas = await service.search_cinemas(
+                    CinemaSearchParams(location=location, limit=1000),
+                )
+            except Exception:
+                logger.exception("Failed to fetch priority location %r", location)
+                continue
+            fetched.add(location.casefold())
+            for cinema in cinemas:
+                if cinema.id not in seen:
+                    seen.add(cinema.id)
+                    found.append(cinema)
+        return found, fetched
+
+    def _cinemas_to_prefetch(self, cinemas: list[Cinema]) -> list[str]:
+        """Cinema IDs to pre-fetch shows for: explicit IDs, then the first N cinemas.
+
+        ``cinemas`` must already be ordered with priority locations first. Relying on
+        ``kinoheld_sync_cinema_ids`` alone means an unset list silently leaves the show
+        cache empty, which is invisible until someone notices ``cached_shows`` at 0.
         """
         selected = list(settings.kinoheld_sync_cinema_ids)
         seen = set(selected)
@@ -249,9 +280,15 @@ class KinoheldCache:
         """Fetch data from Kinoheld and rebuild the cache atomically."""
         logger.info("Starting Kinoheld cache refresh")
 
-        cinemas = await service.search_cinemas(
+        catalogue = await service.search_cinemas(
             CinemaSearchParams(limit=settings.kinoheld_sync_cinema_limit),
         )
+        # Priority locations lead the list so the pre-warm budget reaches them first,
+        # and their cinemas are merged in even if the global slice omitted them.
+        priority, priority_locations = await self._priority_cinemas(service)
+        priority_ids = {cinema.id for cinema in priority}
+        cinemas = priority + [c for c in catalogue if c.id not in priority_ids]
+
         movies = await service.search_movies(
             MovieSearchParams(limit=settings.kinoheld_sync_movie_limit),
         )
@@ -270,7 +307,8 @@ class KinoheldCache:
 
         async with self._lock:
             self._cinemas = cinemas
-            self._backfilled_locations.clear()
+            # Priority locations were just fetched in full, so they need no backfill.
+            self._backfilled_locations = set(priority_locations)
             self._movies = movies
             # Merge so on-demand entries cached via cache_shows_for_cinema survive
             # periodic refreshes (which only cover the configured sync cinemas).

@@ -124,13 +124,20 @@ class Settings(BaseSettings):
         default_factory=list,
         description="Cinema IDs to pre-fetch shows for during cache refresh",
     )
+    kinoheld_sync_priority_locations: StringList = Field(
+        default_factory=list,
+        description=(
+            "Locations whose cinemas are pre-warmed first. When the pre-warm budget "
+            "only covers a fraction of the catalogue, these get it"
+        ),
+    )
     kinoheld_sync_cinema_count: int = Field(
         default=0,
         ge=0,
-        le=200,
+        le=500,
         description=(
-            "Additionally pre-fetch shows for the first N cached cinemas, so show "
-            "pre-warming does not depend on a hand-maintained ID list"
+            "Additionally pre-fetch shows for the first N cinemas, priority locations "
+            "first, so show pre-warming does not depend on a hand-maintained ID list"
         ),
     )
     kinoheld_sync_concurrency: int = Field(
@@ -210,6 +217,7 @@ class Settings(BaseSettings):
         "cinetixx_sync_discovery_searches",
         "cinetixx_discovery_terms",
         "kinoheld_sync_cinema_ids",
+        "kinoheld_sync_priority_locations",
         mode="before",
     )
     @classmethod

@@ -68,6 +68,77 @@ class TestRefresh:
         assert sum(snapshot["shows"].values()) == 2
         assert {key.split("::")[0] for key in snapshot["shows"]} == {"0", "1"}
 
+    async def test_priority_locations_get_the_prewarm_budget_first(
+        self,
+        cache: KinoheldCache,
+        mock_service: AsyncMock,
+        monkeypatch,
+    ):
+        """A small budget must land on the locations we actually serve."""
+        monkeypatch.setattr(settings, "kinoheld_sync_cinema_ids", [])
+        monkeypatch.setattr(settings, "kinoheld_sync_priority_locations", ["Berlin"])
+        monkeypatch.setattr(settings, "kinoheld_sync_cinema_count", 2)
+        monkeypatch.setattr(settings, "kinoheld_sync_show_days", 1)
+        berlin = [Cinema(id="b1", name="Babylon"), Cinema(id="b2", name="Central")]
+        catalogue = [Cinema(id=f"x{i}", name=f"Elsewhere {i}") for i in range(50)]
+
+        async def search_cinemas(params):
+            return berlin if params.location == "Berlin" else catalogue
+
+        mock_service.search_cinemas.side_effect = search_cinemas
+        mock_service.search_movies.return_value = []
+        mock_service.search_cities.return_value = []
+        mock_service.list_genres.return_value = []
+        mock_service.search_shows.return_value = []
+
+        await cache.refresh(mock_service)
+
+        assert {key.split("::")[0] for key in cache.snapshot()["shows"]} == {"b1", "b2"}
+        # Priority cinemas lead the cached list, and the rest of the catalogue follows.
+        assert [c.id for c in cache._cinemas[:2]] == ["b1", "b2"]
+        assert len(cache._cinemas) == 52
+
+    async def test_priority_location_is_not_backfilled_again(
+        self,
+        cache: KinoheldCache,
+        mock_service: AsyncMock,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(settings, "kinoheld_sync_priority_locations", ["Berlin"])
+        monkeypatch.setattr(settings, "kinoheld_sync_cinema_count", 0)
+        mock_service.search_cinemas.return_value = [Cinema(id="b1", name="Babylon")]
+        mock_service.search_movies.return_value = []
+        mock_service.search_cities.return_value = []
+        mock_service.list_genres.return_value = []
+
+        await cache.refresh(mock_service)
+
+        assert await cache.is_location_backfilled("berlin") is True
+        assert await cache.is_location_backfilled("Hamburg") is False
+
+    async def test_failed_priority_location_is_not_marked_backfilled(
+        self,
+        cache: KinoheldCache,
+        mock_service: AsyncMock,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(settings, "kinoheld_sync_priority_locations", ["Berlin"])
+        monkeypatch.setattr(settings, "kinoheld_sync_cinema_count", 0)
+
+        async def search_cinemas(params):
+            if params.location == "Berlin":
+                raise RuntimeError("upstream down")
+            return []
+
+        mock_service.search_cinemas.side_effect = search_cinemas
+        mock_service.search_movies.return_value = []
+        mock_service.search_cities.return_value = []
+        mock_service.list_genres.return_value = []
+
+        await cache.refresh(mock_service)
+
+        assert await cache.is_location_backfilled("Berlin") is False
+
     async def test_explicit_cinema_ids_are_merged_with_the_auto_selection(
         self,
         cache: KinoheldCache,
