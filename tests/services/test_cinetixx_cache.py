@@ -33,6 +33,56 @@ class TestCinetixxCache:
         assert snapshot["shows"] == 1
         client.get_show_info.assert_awaited_once_with(42)
 
+    async def test_all_mandator_dataset_is_memoized_until_invalidated(self, monkeypatch):
+        """The all-mandator merge is the hot path; it must not rebuild per request."""
+        client = AsyncMock()
+        client.get_show_info.return_value = (
+            json.dumps({"shows": [SAMPLE_ROW]}),
+            "application/json",
+        )
+        service = CinetixxService(client)
+        cache = CinetixxCache()
+        await cache.cache_mandator(service, 42)
+
+        merges = 0
+        original = CinetixxService.merge_datasets
+
+        def counting_merge(datasets):
+            nonlocal merges
+            merges += 1
+            return original(datasets)
+
+        monkeypatch.setattr(CinetixxService, "merge_datasets", counting_merge)
+
+        first = await cache.get_dataset()
+        second = await cache.get_dataset()
+        assert merges == 1
+        assert first is second
+
+        # Caching another mandator must invalidate the memo.
+        await cache.cache_mandator(service, 43)
+        third = await cache.get_dataset()
+        assert merges == 2
+        assert third is not first
+        assert {cinema.id for cinema in third.cinemas} >= {cinema.id for cinema in first.cinemas}
+
+    async def test_all_mandator_merge_does_not_mutate_per_mandator_datasets(self):
+        """merge_datasets mutates city mandator_ids, so it must work on copies."""
+        client = AsyncMock()
+        client.get_show_info.return_value = (
+            json.dumps({"shows": [SAMPLE_ROW]}),
+            "application/json",
+        )
+        service = CinetixxService(client)
+        cache = CinetixxCache()
+        await cache.cache_mandator(service, 42)
+
+        before = [city.mandator_ids.copy() for city in (await cache.get_dataset(42)).cities]
+        await cache.get_dataset()
+        after = [city.mandator_ids for city in (await cache.get_dataset(42)).cities]
+
+        assert before == after
+
     async def test_refresh_keeps_on_demand_mandators_when_no_sync_ids(self, monkeypatch):
         monkeypatch.setattr(settings, "cinetixx_sync_mandator_ids", [])
         client = AsyncMock()

@@ -41,6 +41,32 @@ def _matches(value: str | None, query: str | None) -> bool:
     return query.casefold() in value.casefold()
 
 
+def _clean_address(address: str | None) -> str | None:
+    """Drop placeholder addresses such as ``","`` that carry no street information."""
+    if address is None:
+        return None
+    stripped = address.strip(" ,\t")
+    return stripped if any(char.isalnum() for char in stripped) else None
+
+
+def _venue_fields(cinema: CinetixxCinema, entry: CinetixxMandator) -> dict[str, Any]:
+    """Booking-index fields to merge into a cinema, preferring existing programme data."""
+    return {
+        "cinema_id": cinema.cinema_id or entry.cinema_id,
+        "name": cinema.name or entry.cinema_name or entry.name,
+        "city": cinema.city or entry.city,
+        "address": _clean_address(entry.address) or cinema.address,
+        "post_code": entry.post_code or cinema.post_code,
+        "phone": entry.phone or cinema.phone,
+        "latitude": entry.latitude if entry.latitude is not None else cinema.latitude,
+        "longitude": entry.longitude if entry.longitude is not None else cinema.longitude,
+        "program_url": entry.program_url or cinema.program_url,
+        "pretty_program_url": entry.pretty_program_url or cinema.pretty_program_url,
+        "special_event_image_url": entry.special_event_image_url
+        or cinema.special_event_image_url,
+    }
+
+
 def _key_token(key: str) -> str:
     """Normalize Cinetixx field names across camelCase, snake_case, and XML tags."""
     return re.sub(r"[^a-z0-9]", "", key.casefold())
@@ -218,12 +244,14 @@ class CinetixxService:
     async def get_dataset(self, mandator_id: int | None = None) -> CinetixxDataset:
         """Fetch and normalize Cinetixx program data for one or more mandators."""
         datasets: list[CinetixxDataset] = []
-        mandators: dict[int, CinetixxMandator] = {}
+        # Keep every booking-index record per mandator: one operator runs many venues,
+        # each with its own address and coordinates.
+        mandators: dict[int, list[CinetixxMandator]] = {}
         if mandator_id is not None:
             mandator_ids = [mandator_id]
         else:
-            discovered = await self.discover_all_mandators()
-            mandators = {item.mandator_id: item for item in discovered}
+            for item in await self.discover_all_mandators():
+                mandators.setdefault(item.mandator_id, []).append(item)
             mandator_ids = sorted(set(mandators) | set(settings.cinetixx_sync_mandator_ids))
         for resolved_id in mandator_ids:
             show_info = await self.get_show_info(CinetixxShowInfoParams(mandator_id=resolved_id))
@@ -333,7 +361,7 @@ class CinetixxService:
     def _normalize_and_enrich(
         self,
         show_info: CinetixxShowInfo,
-        mandator: CinetixxMandator | None,
+        mandator: CinetixxMandator | list[CinetixxMandator] | None,
     ) -> CinetixxDataset:
         """Normalize programme rows and attach booking-index metadata."""
         return self.enrich_dataset(self.normalize_show_info(show_info), mandator)
@@ -341,54 +369,64 @@ class CinetixxService:
     @staticmethod
     def enrich_dataset(
         dataset: CinetixxDataset,
-        mandator: CinetixxMandator | None,
+        mandator: CinetixxMandator | list[CinetixxMandator] | None,
     ) -> CinetixxDataset:
-        """Add booking-index cinema metadata missing from legacy programme rows."""
+        """Add booking-index cinema metadata missing from legacy programme rows.
+
+        One mandator (operator) commonly runs several venues, and the programme rows
+        carry no address or coordinates at all — only a ``CINEMA_ID``. The booking
+        index does hold a distinct record per venue, so accept every record for this
+        mandator and match each cinema to its own by ``cinema_id``. Collapsing them to
+        a single per-mandator record stamps one venue's address and coordinates onto
+        all of its siblings.
+        """
         if mandator is None:
             return dataset
+        mandators = [mandator] if isinstance(mandator, CinetixxMandator) else list(mandator)
+        if not mandators:
+            return dataset
+
+        by_cinema_id = {item.cinema_id: item for item in mandators if item.cinema_id}
+        mandator_ids = {item.mandator_id for item in mandators}
 
         cinemas = []
-        matched_mandator = False
+        matched_cinema_ids = set()
         for cinema in dataset.cinemas:
-            if cinema.mandator_id != mandator.mandator_id:
+            if cinema.mandator_id not in mandator_ids:
                 cinemas.append(cinema)
                 continue
-            matched_mandator = True
-            cinemas.append(
-                cinema.model_copy(
-                    update={
-                        "cinema_id": cinema.cinema_id or mandator.cinema_id,
-                        "name": cinema.name or mandator.cinema_name or mandator.name,
-                        "city": cinema.city or mandator.city,
-                        "address": mandator.address,
-                        "post_code": mandator.post_code,
-                        "phone": mandator.phone,
-                        "latitude": mandator.latitude,
-                        "longitude": mandator.longitude,
-                        "program_url": mandator.program_url,
-                        "pretty_program_url": mandator.pretty_program_url,
-                        "special_event_image_url": mandator.special_event_image_url,
-                    },
-                ),
-            )
-        if not matched_mandator:
-            cinemas.append(
-                CinetixxCinema(
-                    id=mandator.cinema_id,
-                    mandatorId=mandator.mandator_id,
-                    cinemaId=mandator.cinema_id,
-                    name=mandator.cinema_name or mandator.name,
-                    city=mandator.city,
-                    address=mandator.address,
-                    postCode=mandator.post_code,
-                    phone=mandator.phone,
-                    latitude=mandator.latitude,
-                    longitude=mandator.longitude,
-                    programUrl=mandator.program_url,
-                    prettyProgramUrl=mandator.pretty_program_url,
-                    specialEventImageUrl=mandator.special_event_image_url,
-                ),
-            )
+            # Only enrich from this venue's own booking-index record. A sibling
+            # venue's address is worse than no address at all.
+            entry = by_cinema_id.get(cinema.cinema_id or cinema.id)
+            if entry is None:
+                cinemas.append(cinema)
+                continue
+            matched_cinema_ids.add(entry.cinema_id)
+            cinemas.append(cinema.model_copy(update=_venue_fields(cinema, entry)))
+
+        # Surface venues that the booking index knows about but that have no
+        # programme rows in this payload.
+        for entry in mandators:
+            if entry.cinema_id and entry.cinema_id not in matched_cinema_ids:
+                if any(c.cinema_id == entry.cinema_id or c.id == entry.cinema_id for c in cinemas):
+                    continue
+                cinemas.append(
+                    CinetixxCinema(
+                        id=entry.cinema_id,
+                        mandatorId=entry.mandator_id,
+                        cinemaId=entry.cinema_id,
+                        name=entry.cinema_name or entry.name,
+                        city=entry.city,
+                        address=_clean_address(entry.address),
+                        postCode=entry.post_code,
+                        phone=entry.phone,
+                        latitude=entry.latitude,
+                        longitude=entry.longitude,
+                        programUrl=entry.program_url,
+                        prettyProgramUrl=entry.pretty_program_url,
+                        specialEventImageUrl=entry.special_event_image_url,
+                    ),
+                )
         return dataset.model_copy(update={"cinemas": cinemas})
 
     @staticmethod

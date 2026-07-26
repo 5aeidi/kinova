@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from app.core.config import settings
 from app.core.exceptions import KinoheldNotFoundError
 from app.schemas.cinema import Cinema, CinemaSearchParams, CitySummary
 from app.schemas.city import City, CitySearchParams
@@ -306,6 +307,109 @@ class TestGenreEnrichment:
 
         cached = cache._shows["c1::2026-07-26"][0]
         assert [g.name for g in cached.movie.genres] == ["Drama"]
+
+    async def test_genres_resolved_live_for_titles_outside_cached_catalog(
+        self,
+        cache: KinoheldCache,
+        mock_service: AsyncMock,
+    ):
+        """Arthouse/event films fall outside the capped catalog slice; look them up."""
+        cache._movies = []
+        show = Show(
+            id="s1",
+            name="Unearthing Time: Joan of Arc (OmeU)",
+            movie=Movie(id="424933", title="Unearthing Time: Joan of Arc (OmeU)", genres=[]),
+        )
+        mock_service.search_shows.return_value = [show]
+        mock_service.search_movies.return_value = [
+            Movie(
+                id="7",
+                title="Unearthing Time: Joan of Arc",
+                genres=[Genre(id="9", name="Dokumentarfilm")],
+            ),
+        ]
+
+        await cache.cache_shows_for_cinema(mock_service, "c1", ["2026-07-26"])
+
+        cached = cache._shows["c1::2026-07-26"][0]
+        assert [g.name for g in cached.movie.genres] == ["Dokumentarfilm"]
+
+    async def test_resolved_genres_are_remembered_across_batches(
+        self,
+        cache: KinoheldCache,
+        mock_service: AsyncMock,
+    ):
+        cache._movies = []
+        mock_service.search_movies.return_value = [
+            Movie(id="7", title="Rose", genres=[Genre(name="Drama")]),
+        ]
+
+        def make_show():
+            return Show(id="s1", name="Rose (OmU)", movie=Movie(id="1", title="Rose (OmU)"))
+
+        mock_service.search_shows.return_value = [make_show()]
+        await cache.cache_shows_for_cinema(mock_service, "c1", ["2026-07-26"])
+        lookups = mock_service.search_movies.await_count
+
+        mock_service.search_shows.return_value = [make_show()]
+        await cache.cache_shows_for_cinema(mock_service, "c2", ["2026-07-26"])
+
+        assert mock_service.search_movies.await_count == lookups
+        cached = cache._shows["c2::2026-07-26"][0]
+        assert [g.name for g in cached.movie.genres] == ["Drama"]
+
+    async def test_unresolvable_title_is_not_retried_every_request(
+        self,
+        cache: KinoheldCache,
+        mock_service: AsyncMock,
+    ):
+        cache._movies = []
+        mock_service.search_movies.return_value = []
+        mock_service.search_shows.return_value = [
+            Show(id="s1", name="Obscure", movie=Movie(id="1", title="Obscure")),
+        ]
+
+        await cache.cache_shows_for_cinema(mock_service, "c1", ["2026-07-26"])
+        lookups = mock_service.search_movies.await_count
+        mock_service.search_shows.return_value = [
+            Show(id="s2", name="Obscure", movie=Movie(id="1", title="Obscure")),
+        ]
+        await cache.cache_shows_for_cinema(mock_service, "c2", ["2026-07-26"])
+
+        assert mock_service.search_movies.await_count == lookups
+
+    async def test_live_genre_lookups_are_bounded(
+        self,
+        cache: KinoheldCache,
+        mock_service: AsyncMock,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(settings, "kinoheld_genre_lookup_limit", 3)
+        cache._movies = []
+        mock_service.search_movies.return_value = []
+        mock_service.search_shows.return_value = [
+            Show(id=f"s{i}", name=f"Film {i}", movie=Movie(id=str(i), title=f"Film {i}"))
+            for i in range(20)
+        ]
+
+        await cache.cache_shows_for_cinema(mock_service, "c1", ["2026-07-26"])
+
+        assert mock_service.search_movies.await_count == 3
+
+    async def test_show_lookup_failure_does_not_break_enrichment(
+        self,
+        cache: KinoheldCache,
+        mock_service: AsyncMock,
+    ):
+        cache._movies = []
+        mock_service.search_movies.side_effect = RuntimeError("upstream down")
+        mock_service.search_shows.return_value = [
+            Show(id="s1", name="Rose", movie=Movie(id="1", title="Rose")),
+        ]
+
+        await cache.cache_shows_for_cinema(mock_service, "c1", ["2026-07-26"])
+
+        assert cache._shows["c1::2026-07-26"][0].movie.genres == []
 
     async def test_real_genres_kept_and_blanks_dropped(
         self,

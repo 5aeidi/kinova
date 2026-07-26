@@ -38,26 +38,39 @@ def _normalize_title(title: str) -> str:
     return normalized.casefold()
 
 
-def _enrich_show_genres(shows: Iterable[Show], movies: Iterable[Movie]) -> None:
-    """Backfill empty show-embedded genres from the movie catalog by title.
+def _titles_with_genres(movies: Iterable[Movie]) -> dict[str, list[Genre]]:
+    """Index real (non-placeholder) genres by normalized title."""
+    return {
+        _normalize_title(movie.title): movie.genres
+        for movie in movies
+        if movie.title and movie.genres and any(g.name for g in movie.genres)
+    }
+
+
+def _enrich_show_genres(shows: Iterable[Show], genres_by_title: dict[str, list[Genre]]) -> None:
+    """Backfill empty show-embedded genres from a title -> genres index.
 
     Kinoheld's show query returns placeholder genres ({"id": null, "name": ""})
     for the per-version movie records embedded in shows, while the catalog query
     has real genre data for the same films.
     """
-    catalog_genres = {
-        _normalize_title(movie.title): movie.genres
-        for movie in movies
-        if movie.title and movie.genres and any(g.name for g in movie.genres)
-    }
     for show in shows:
         movie = show.movie
         if movie is None:
             continue
         genres = [g for g in (movie.genres or []) if g.name]
         if not genres and movie.title:
-            genres = catalog_genres.get(_normalize_title(movie.title), [])
+            genres = genres_by_title.get(_normalize_title(movie.title), [])
         movie.genres = list(genres)
+
+
+def _titles_missing_genres(shows: Iterable[Show]) -> set[str]:
+    """Return normalized titles of shows still left without any genre."""
+    return {
+        _normalize_title(show.movie.title)
+        for show in shows
+        if show.movie is not None and show.movie.title and not show.movie.genres
+    }
 
 
 def _matches(value: str | None, query: str | None) -> bool:
@@ -94,6 +107,65 @@ class KinoheldCache:
         self._cities: list[City] = []
         self._genres: list[Genre] = []
         self._last_refresh: dt.datetime | None = None
+        # Locations whose full live cinema list has been merged in since the last
+        # refresh. The periodic refresh only fetches a globally capped slice, so a
+        # location query can be served a partial list without this backfill.
+        self._backfilled_locations: set[str] = set()
+        # Normalized title -> genres, accumulated across refreshes. Show-embedded
+        # movies carry placeholder genres, and the cached catalog is a capped slice,
+        # so titles outside it are resolved live once and remembered here.
+        self._genres_by_title: dict[str, list[Genre]] = {}
+        # Titles a live lookup could not resolve; retried once per refresh cycle
+        # rather than on every request.
+        self._unresolved_titles: set[str] = set()
+
+    # ------------------------------------------------------------------
+    # Genre enrichment
+    # ------------------------------------------------------------------
+    def _genre_index(self) -> dict[str, list[Genre]]:
+        """Title -> genres from the cached catalog, plus anything resolved since.
+
+        Callers must hold ``self._lock``.
+        """
+        return _titles_with_genres(self._movies) | self._genres_by_title
+
+    async def _apply_genres(self, service: KinoheldService, shows: list[Show]) -> None:
+        """Fill in show-embedded genres, resolving unknown titles from the catalog.
+
+        The cached catalog is a globally capped slice, so films playing outside it —
+        typically arthouse and one-off event screenings — have no local record to match
+        against. Look those up live, once per title, and remember the answer.
+        """
+        async with self._lock:
+            index = self._genre_index()
+        _enrich_show_genres(shows, index)
+
+        async with self._lock:
+            unknown = _titles_missing_genres(shows) - self._unresolved_titles
+        if not unknown:
+            return
+
+        resolved: dict[str, list[Genre]] = {}
+        unresolved: set[str] = set()
+        for title in sorted(unknown)[: settings.kinoheld_genre_lookup_limit]:
+            try:
+                matches = await service.search_movies(MovieSearchParams(search=title, limit=5))
+            except Exception:  # pragma: no cover - defensive
+                logger.exception("Failed to resolve genres for %r", title)
+                continue
+            genres = _titles_with_genres(matches).get(title)
+            if genres:
+                resolved[title] = genres
+            else:
+                unresolved.add(title)
+
+        if not resolved and not unresolved:
+            return
+        async with self._lock:
+            self._genres_by_title.update(resolved)
+            self._unresolved_titles |= unresolved
+            index = self._genre_index()
+        _enrich_show_genres(shows, index)
 
     # ------------------------------------------------------------------
     # Refresh
@@ -123,11 +195,17 @@ class KinoheldCache:
                     day_shows = []
                 shows[f"{cinema_id}::{date}"] = day_shows
 
+        async with self._lock:
+            self._genres_by_title.update(_titles_with_genres(movies))
+            # Give previously unresolvable titles another chance each cycle.
+            self._unresolved_titles.clear()
+
         for day_shows in shows.values():
-            _enrich_show_genres(day_shows, movies)
+            await self._apply_genres(service, day_shows)
 
         async with self._lock:
             self._cinemas = cinemas
+            self._backfilled_locations.clear()
             self._movies = movies
             # Merge so on-demand entries cached via cache_shows_for_cinema survive
             # periodic refreshes (which only cover the configured sync cinemas).
@@ -191,11 +269,22 @@ class KinoheldCache:
                     return cinema
         raise KinoheldNotFoundError(f"Cinema {cinema_id} not found")
 
-    async def add_cinemas(self, cinemas: list[Cinema]) -> None:
-        """Merge new cinemas into the cache, avoiding duplicates by ID."""
+    async def add_cinemas(self, cinemas: list[Cinema], location: str | None = None) -> None:
+        """Merge new cinemas into the cache, avoiding duplicates by ID.
+
+        Passing ``location`` records that this location's live list has been merged in,
+        so subsequent queries for it are served from the cache alone.
+        """
         async with self._lock:
             existing_ids = {c.id for c in self._cinemas}
             self._cinemas.extend([c for c in cinemas if c.id not in existing_ids])
+            if location:
+                self._backfilled_locations.add(location.casefold())
+
+    async def is_location_backfilled(self, location: str) -> bool:
+        """Return whether this location's full live cinema list is already cached."""
+        async with self._lock:
+            return location.casefold() in self._backfilled_locations
 
     # ------------------------------------------------------------------
     # Movies
@@ -296,9 +385,10 @@ class KinoheldCache:
             except Exception:
                 logger.exception("Failed to fetch shows for cinema %s on %s", cinema_id, date_str)
 
+        for day_shows in fetched.values():
+            await self._apply_genres(service, day_shows)
+
         async with self._lock:
-            for day_shows in fetched.values():
-                _enrich_show_genres(day_shows, self._movies)
             self._shows.update(fetched)
 
     async def has_any_shows(self, cinema_id: str) -> bool:

@@ -1,5 +1,6 @@
 """Internal routes backed by the local Kinoheld cache."""
 
+import contextlib
 import datetime as dt
 from typing import Annotated
 
@@ -90,12 +91,20 @@ async def list_cinemas_internal(
     cache: CacheDep,
     service: CachedServiceDep,
 ) -> list[Cinema]:
-    """Search cached cinemas, falling back to live Kinoheld for location queries."""
-    cinemas = await cache.search_cinemas(params)
-    if params.location and not cinemas:
-        cinemas = await service.search_cinemas(params)
-        await cache.add_cinemas(cinemas)
-    return cinemas
+    """Search cached cinemas, backfilling from live Kinoheld for location queries.
+
+    The periodic refresh caches a globally capped slice of cinemas, so any given
+    location is usually under-represented in it. Backfill the location's full live
+    list once per refresh cycle rather than only when the cache returns nothing.
+    """
+    if params.location and not await cache.is_location_backfilled(params.location):
+        # Fetch the location's whole list, not just this request's page, so a small
+        # ``limit`` does not mark the location backfilled with a partial result.
+        backfill = params.model_copy(update={"limit": 1000})
+        # A live-source failure must not break a cached endpoint; serve what we have.
+        with contextlib.suppress(Exception):
+            await cache.add_cinemas(await service.search_cinemas(backfill), params.location)
+    return await cache.search_cinemas(params)
 
 
 @router.get("/cinemas/{cinema_id}", response_model=Cinema)

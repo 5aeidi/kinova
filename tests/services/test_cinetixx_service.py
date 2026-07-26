@@ -243,7 +243,9 @@ class TestNormalizeShowInfo:
 
     def test_enriches_cinema_with_booking_index_metadata(self):
         service = CinetixxService(AsyncMock())
-        row = {**SAMPLE_ROW, "mandatorId": 1627457285}
+        # Programme rows identify their venue by CINEMA_ID, which is the booking
+        # index's cinema id for that venue.
+        row = {**SAMPLE_ROW, "mandatorId": 1627457285, "cinemaId": "1627459203"}
         show_info = CinetixxShowInfo(mandatorId=1627457285, data={"shows": [row]})
         mandator = service._payload_to_mandator(SAMPLE_DISCOVERY)
 
@@ -265,6 +267,66 @@ class TestNormalizeShowInfo:
             "Sci-Fi",
             "Event",
         }
+
+    def test_sibling_venues_keep_their_own_address_and_coordinates(self):
+        """One operator runs many venues; each must keep its own booking-index record."""
+        service = CinetixxService(AsyncMock())
+        mandator_id = 385593424
+        venues = {
+            "1160258824": ("Kino Central", "Rosenthaler Straße 39, 10178 Berlin", 52.524532),
+            "1779346593": ("Kino Toni", "Antonplatz 1, 13086 Berlin", 52.548932),
+            "385625463": ("Moviemento", "Kottbusser Damm 22, 10967 Berlin", 52.490311),
+        }
+        rows = [
+            {
+                **SAMPLE_ROW,
+                "showId": index,
+                "mandatorId": mandator_id,
+                "cinemaId": cinema_id,
+                "kino": name,
+            }
+            for index, (cinema_id, (name, _, _)) in enumerate(venues.items())
+        ]
+        discovered = [
+            service._payload_to_mandator(
+                {
+                    **SAMPLE_DISCOVERY,
+                    "id": int(cinema_id),
+                    "mandatorId": mandator_id,
+                    "cinemaName": name,
+                    "address": address,
+                    "latitude": latitude,
+                },
+            )
+            for cinema_id, (name, address, latitude) in venues.items()
+        ]
+
+        dataset = service.enrich_dataset(
+            service.normalize_show_info(
+                CinetixxShowInfo(mandatorId=mandator_id, data={"shows": rows}),
+            ),
+            discovered,
+        )
+
+        by_id = {cinema.id: cinema for cinema in dataset.cinemas}
+        for cinema_id, (_, address, latitude) in venues.items():
+            assert by_id[cinema_id].address == address
+            assert by_id[cinema_id].latitude == latitude
+        assert len({cinema.address for cinema in dataset.cinemas}) == len(venues)
+
+    def test_placeholder_address_is_dropped_rather_than_stored(self):
+        service = CinetixxService(AsyncMock())
+        row = {**SAMPLE_ROW, "mandatorId": 1627457285, "cinemaId": "1627459203"}
+        mandator = service._payload_to_mandator({**SAMPLE_DISCOVERY, "address": ","})
+
+        dataset = service.enrich_dataset(
+            service.normalize_show_info(
+                CinetixxShowInfo(mandatorId=1627457285, data={"shows": [row]}),
+            ),
+            mandator,
+        )
+
+        assert dataset.cinemas[0].address is None
 
     def test_filters_normalized_movies_and_shows(self):
         service = CinetixxService(AsyncMock())

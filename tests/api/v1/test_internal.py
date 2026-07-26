@@ -217,6 +217,60 @@ class TestInternalCinemas:
         assert data[0]["id"] == "1"
         assert data[0]["name"] == "Berlin Kino"
 
+    def test_list_cinemas_backfills_location_when_cache_is_partial(
+        self,
+        internal_client: TestClient,
+        mock_graphql_client: AsyncMock,
+    ):
+        """A non-empty but incomplete cached location must still be backfilled."""
+        cache = internal_client.app.state.kinoheld_cache
+        cache._cinemas = [
+            Cinema(id="1", name="Berlin Kino", city=CitySummary(name="Berlin")),
+        ]
+        mock_graphql_client.execute.return_value = {
+            "cinemas": [
+                {"id": "1", "name": "Berlin Kino", "city": {"name": "Berlin"}},
+                {"id": "2", "name": "Berlin Kino Zwei", "city": {"name": "Berlin"}},
+                {"id": "3", "name": "Berlin Kino Drei", "city": {"name": "Berlin"}},
+            ],
+        }
+
+        response = internal_client.get("/api/v1/internal/cinemas?location=Berlin")
+
+        assert response.status_code == 200
+        assert {item["id"] for item in response.json()} == {"1", "2", "3"}
+
+    def test_list_cinemas_backfills_a_location_only_once(
+        self,
+        internal_client: TestClient,
+        mock_graphql_client: AsyncMock,
+    ):
+        mock_graphql_client.execute.return_value = {
+            "cinemas": [{"id": "1", "name": "Berlin Kino", "city": {"name": "Berlin"}}],
+        }
+
+        internal_client.get("/api/v1/internal/cinemas?location=Berlin")
+        calls_after_first = mock_graphql_client.execute.await_count
+        internal_client.get("/api/v1/internal/cinemas?location=Berlin")
+
+        assert mock_graphql_client.execute.await_count == calls_after_first
+
+    def test_list_cinemas_serves_cache_when_live_backfill_fails(
+        self,
+        internal_client: TestClient,
+        mock_graphql_client: AsyncMock,
+    ):
+        cache = internal_client.app.state.kinoheld_cache
+        cache._cinemas = [
+            Cinema(id="1", name="Berlin Kino", city=CitySummary(name="Berlin")),
+        ]
+        mock_graphql_client.execute.side_effect = RuntimeError("upstream down")
+
+        response = internal_client.get("/api/v1/internal/cinemas?location=Berlin")
+
+        assert response.status_code == 200
+        assert [item["id"] for item in response.json()] == ["1"]
+
 
 class TestInternalCities:
     def test_list_cities_returns_cached_data(self, internal_client: TestClient):

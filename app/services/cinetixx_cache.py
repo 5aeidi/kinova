@@ -38,6 +38,11 @@ class CinetixxCache:
         self._datasets: dict[int, CinetixxDataset] = {}
         self._mandators: dict[str, CinetixxMandator] = {}
         self._last_refresh: dt.datetime | None = None
+        # Memoized merge of every cached mandator dataset. Rebuilding it costs seconds
+        # once there are hundreds of mandators, so it is computed on first read after a
+        # mutation and reused until ``_datasets`` changes again. Treat it as read-only:
+        # it is shared by every caller of ``get_dataset(None)``.
+        self._merged: CinetixxDataset | None = None
 
     async def refresh(self, service: CinetixxService) -> None:
         """Refresh configured Cinetixx discovery searches and mandator data."""
@@ -60,7 +65,11 @@ class CinetixxCache:
             | {item.mandator_id for item in mandators.values()}
             | set(existing_datasets.keys()),
         )
-        mandators_by_id = {item.mandator_id: item for item in mandators.values()}
+        # Group every booking-index record by mandator; one operator runs many venues
+        # and each carries its own address and coordinates.
+        mandators_by_id: dict[int, list[CinetixxMandator]] = {}
+        for item in mandators.values():
+            mandators_by_id.setdefault(item.mandator_id, []).append(item)
         payloads: dict[int, CinetixxShowInfo] = {}
         datasets: dict[int, CinetixxDataset] = {}
         total = len(mandator_ids)
@@ -91,9 +100,10 @@ class CinetixxCache:
             self._payloads = payloads
             self._datasets = datasets
             self._mandators = mandators
+            self._merged = None
             self._last_refresh = dt.datetime.now(tz=dt.timezone.utc)
+            merged = self._merged_dataset()
 
-        merged = CinetixxService.merge_datasets(list(datasets.values()))
         logger.info(
             "Cinetixx cache refresh complete: %d discovered, %d mandators, %d cinemas, "
             "%d movies, %d shows",
@@ -136,15 +146,15 @@ class CinetixxCache:
         """Fetch and cache one Cinetixx mandator on demand."""
         show_info = await service.get_show_info_by_mandator(mandator_id)
         async with self._lock:
-            mandator = next(
-                (item for item in self._mandators.values() if item.mandator_id == mandator_id),
-                None,
-            )
-        dataset = service._normalize_and_enrich(show_info, mandator)
+            venues = [
+                item for item in self._mandators.values() if item.mandator_id == mandator_id
+            ]
+        dataset = service._normalize_and_enrich(show_info, venues)
 
         async with self._lock:
             self._payloads[mandator_id] = show_info
             self._datasets[mandator_id] = dataset
+            self._merged = None
             self._last_refresh = dt.datetime.now(tz=dt.timezone.utc)
 
     async def cache_mandators(
@@ -171,17 +181,32 @@ class CinetixxCache:
                 return payload
         raise CinetixxNotFoundError(f"Cinetixx mandator {mandator_id} not found in cache")
 
+    def _merged_dataset(self) -> CinetixxDataset:
+        """Return the memoized all-mandator merge, rebuilding it if stale.
+
+        Contains no awaits, so it runs atomically with respect to the event loop and is
+        safe to call with or without ``self._lock`` held. The merge is built from deep
+        copies because ``merge_datasets`` mutates the ``mandator_ids`` of the city
+        objects it is handed, which would otherwise corrupt the per-mandator datasets.
+        """
+        if self._merged is None:
+            self._merged = CinetixxService.merge_datasets(
+                [dataset.model_copy(deep=True) for dataset in self._datasets.values()],
+            )
+        return self._merged
+
     async def get_dataset(self, mandator_id: int | None = None) -> CinetixxDataset:
-        """Return a normalized dataset for one mandator or all cached mandators."""
+        """Return a normalized dataset for one mandator or all cached mandators.
+
+        The returned dataset is shared cache state and must not be mutated by callers.
+        """
         async with self._lock:
             if mandator_id is not None:
                 dataset = self._datasets.get(mandator_id)
                 if dataset is None:
                     return CinetixxDataset()
-                return dataset.model_copy(deep=True)
-            return CinetixxService.merge_datasets(
-                [dataset.model_copy(deep=True) for dataset in self._datasets.values()],
-            )
+                return dataset
+            return self._merged_dataset()
 
     async def search_cinemas(self, params: CinetixxCinemaSearchParams) -> list[CinetixxCinema]:
         """Search cached Cinetixx cinemas."""
@@ -263,8 +288,7 @@ class CinetixxCache:
 
     def snapshot(self) -> dict:
         """Return a lightweight cache status snapshot."""
-        datasets = [dataset.model_copy(deep=True) for dataset in self._datasets.values()]
-        merged = CinetixxService.merge_datasets(datasets)
+        merged = self._merged_dataset()
         return {
             "last_refresh": self._last_refresh.isoformat() if self._last_refresh else None,
             "mandators": sorted(self._datasets.keys()),
