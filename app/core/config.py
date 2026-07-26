@@ -124,6 +124,21 @@ class Settings(BaseSettings):
         default_factory=list,
         description="Cinema IDs to pre-fetch shows for during cache refresh",
     )
+    kinoheld_sync_cinema_count: int = Field(
+        default=0,
+        ge=0,
+        le=200,
+        description=(
+            "Additionally pre-fetch shows for the first N cached cinemas, so show "
+            "pre-warming does not depend on a hand-maintained ID list"
+        ),
+    )
+    kinoheld_sync_concurrency: int = Field(
+        default=8,
+        ge=1,
+        le=32,
+        description="Max concurrent show requests during cache refresh",
+    )
     kinoheld_sync_show_days: int = Field(
         default=7,
         ge=1,
@@ -137,9 +152,9 @@ class Settings(BaseSettings):
         description="Max movies to fetch per cache refresh",
     )
     kinoheld_genre_lookup_limit: int = Field(
-        default=25,
+        default=100,
         ge=0,
-        le=200,
+        le=500,
         description=(
             "Max live movie lookups per show batch used to backfill show-embedded "
             "genres for films outside the cached catalog slice"

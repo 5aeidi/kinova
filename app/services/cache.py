@@ -145,19 +145,27 @@ class KinoheldCache:
         if not unknown:
             return
 
-        resolved: dict[str, list[Genre]] = {}
-        unresolved: set[str] = set()
-        for title in sorted(unknown)[: settings.kinoheld_genre_lookup_limit]:
-            try:
-                matches = await service.search_movies(MovieSearchParams(search=title, limit=5))
-            except Exception:  # pragma: no cover - defensive
-                logger.exception("Failed to resolve genres for %r", title)
-                continue
-            genres = _titles_with_genres(matches).get(title)
-            if genres:
-                resolved[title] = genres
-            else:
-                unresolved.add(title)
+        semaphore = asyncio.Semaphore(settings.kinoheld_sync_concurrency)
+
+        async def resolve(title: str) -> tuple[str, list[Genre], bool]:
+            """Return (title, genres, failed). A failed lookup is retried later."""
+            async with semaphore:
+                try:
+                    matches = await service.search_movies(
+                        MovieSearchParams(search=title, limit=5),
+                    )
+                except Exception:
+                    logger.exception("Failed to resolve genres for %r", title)
+                    return title, [], True
+            return title, _titles_with_genres(matches).get(title) or [], False
+
+        lookups = await asyncio.gather(
+            *(resolve(t) for t in sorted(unknown)[: settings.kinoheld_genre_lookup_limit]),
+        )
+        resolved = {title: genres for title, genres, _ in lookups if genres}
+        # Only titles the catalog genuinely has nothing for are remembered as
+        # unresolved; a transient lookup failure must not poison the title.
+        unresolved = {title for title, genres, failed in lookups if not genres and not failed}
 
         if not resolved and not unresolved:
             return
@@ -170,6 +178,73 @@ class KinoheldCache:
     # ------------------------------------------------------------------
     # Refresh
     # ------------------------------------------------------------------
+    def _cinemas_to_prefetch(self, cinemas: list[Cinema]) -> list[str]:
+        """Cinema IDs to pre-fetch shows for: explicit IDs plus the first N cached.
+
+        Relying on ``kinoheld_sync_cinema_ids`` alone means an unset list silently
+        leaves the show cache empty, which is invisible until someone notices
+        ``cached_shows`` reading 0.
+        """
+        selected = list(settings.kinoheld_sync_cinema_ids)
+        seen = set(selected)
+        for cinema in cinemas[: settings.kinoheld_sync_cinema_count]:
+            if cinema.id not in seen:
+                seen.add(cinema.id)
+                selected.append(cinema.id)
+        return selected
+
+    async def _prefetch_shows(
+        self,
+        service: KinoheldService,
+        cinemas: list[Cinema],
+    ) -> dict[str, list[Show]]:
+        """Fetch shows for the pre-warm set concurrently, one entry per cinema/date."""
+        cinema_ids = self._cinemas_to_prefetch(cinemas)
+        if not cinema_ids:
+            return {}
+
+        dates = [
+            (dt.date.today() + dt.timedelta(days=offset)).isoformat()
+            for offset in range(settings.kinoheld_sync_show_days)
+        ]
+        shows = await self._fetch_shows(service, cinema_ids, dates)
+        logger.info(
+            "Pre-fetched shows for %d cinemas over %d days",
+            len(cinema_ids),
+            len(dates),
+        )
+        return shows
+
+    async def _fetch_shows(
+        self,
+        service: KinoheldService,
+        cinema_ids: Iterable[str],
+        dates: Iterable[str],
+    ) -> dict[str, list[Show]]:
+        """Fetch every cinema/date combination concurrently.
+
+        Serial fetching is the difference between a fast response and a timeout once a
+        location resolves to dozens of cinemas.
+        """
+        semaphore = asyncio.Semaphore(settings.kinoheld_sync_concurrency)
+        dates = list(dates)
+
+        async def fetch(cinema_id: str, date: str) -> tuple[str, list[Show] | None]:
+            params = ShowSearchParams(cinema_id=cinema_id, date=dt.date.fromisoformat(date))
+            async with semaphore:
+                try:
+                    return f"{cinema_id}::{date}", await service.search_shows(params)
+                except Exception:
+                    logger.exception("Failed to fetch shows for cinema %s on %s", cinema_id, date)
+                    # Leave the entry absent rather than caching an empty day, so the
+                    # date is retried instead of reading as "no shows" until refresh.
+                    return f"{cinema_id}::{date}", None
+
+        results = await asyncio.gather(
+            *(fetch(cinema_id, date) for cinema_id in cinema_ids for date in dates),
+        )
+        return {key: shows for key, shows in results if shows is not None}
+
     async def refresh(self, service: KinoheldService) -> None:
         """Fetch data from Kinoheld and rebuild the cache atomically."""
         logger.info("Starting Kinoheld cache refresh")
@@ -183,17 +258,7 @@ class KinoheldCache:
         cities = await service.search_cities(CitySearchParams(limit=100))
         genres = await service.list_genres()
 
-        shows: dict[str, list[Show]] = {}
-        for cinema_id in settings.kinoheld_sync_cinema_ids:
-            for day_offset in range(settings.kinoheld_sync_show_days):
-                date = (dt.date.today() + dt.timedelta(days=day_offset)).isoformat()
-                params = ShowSearchParams(cinema_id=cinema_id, date=dt.date.fromisoformat(date))
-                try:
-                    day_shows = await service.search_shows(params)
-                except Exception:  # pragma: no cover - defensive
-                    logger.exception("Failed to fetch shows for cinema %s on %s", cinema_id, date)
-                    day_shows = []
-                shows[f"{cinema_id}::{date}"] = day_shows
+        shows = await self._prefetch_shows(service, cinemas)
 
         async with self._lock:
             self._genres_by_title.update(_titles_with_genres(movies))
@@ -377,16 +442,23 @@ class KinoheldCache:
         dates: Iterable[str],
     ) -> None:
         """Fetch and cache shows for a cinema/date range on demand."""
-        fetched: dict[str, list[Show]] = {}
-        for date_str in dates:
-            params = ShowSearchParams(cinema_id=cinema_id, date=dt.date.fromisoformat(date_str))
-            try:
-                fetched[f"{cinema_id}::{date_str}"] = await service.search_shows(params)
-            except Exception:
-                logger.exception("Failed to fetch shows for cinema %s on %s", cinema_id, date_str)
+        await self.cache_shows_for_cinemas(service, [cinema_id], dates)
 
-        for day_shows in fetched.values():
-            await self._apply_genres(service, day_shows)
+    async def cache_shows_for_cinemas(
+        self,
+        service: KinoheldService,
+        cinema_ids: Iterable[str],
+        dates: Iterable[str],
+    ) -> None:
+        """Fetch and cache shows for several cinemas at once, concurrently."""
+        cinema_ids = list(cinema_ids)
+        if not cinema_ids:
+            return
+        fetched = await self._fetch_shows(service, cinema_ids, dates)
+
+        # Enrich the whole batch in one pass. Per-day passes repeat the same titles
+        # across cinemas and dates, multiplying the live lookups by the batch size.
+        await self._apply_genres(service, [s for day in fetched.values() for s in day])
 
         async with self._lock:
             self._shows.update(fetched)

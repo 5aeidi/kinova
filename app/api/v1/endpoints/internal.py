@@ -139,13 +139,13 @@ async def list_movies_internal(
     # Ensure we have show data for the location's cinemas so the movie filter
     # can determine which movies are playing there. Only fetch when a cinema
     # has no cached shows at all to avoid unnecessary live requests.
-    cinema_ids = {c.id for c in cinemas}
     base_date = dt.date.today()
     days = settings.kinoheld_sync_show_days
     date_range = [(base_date + dt.timedelta(days=offset)).isoformat() for offset in range(days)]
-    for cinema_id in cinema_ids:
-        if not await cache.has_any_shows(cinema_id):
-            await cache.cache_shows_for_cinema(service, cinema_id, date_range)
+    missing = [c.id for c in cinemas if not await cache.has_any_shows(c.id)]
+    # Fetch the missing cinemas together; serially this is tens of seconds once a
+    # location resolves to dozens of cinemas.
+    await cache.cache_shows_for_cinemas(service, missing, date_range)
 
     return await cache.search_movies(params)
 

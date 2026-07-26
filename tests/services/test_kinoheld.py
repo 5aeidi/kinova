@@ -110,6 +110,56 @@ class TestSearchShows:
         assert "movieId" not in variables
         assert variables == {"cinemaId": "123"}
 
+    async def test_one_malformed_movie_does_not_discard_the_whole_cinema(
+        self,
+        kinoheld_service: KinoheldService,
+        mock_graphql_client: AsyncMock,
+    ):
+        """Kinoheld returns shows whose embedded movie has a null id and title."""
+        mock_graphql_client.execute.return_value = {
+            "shows": [
+                {"id": "1", "name": "Toy Story 5", "movie": {"id": "9", "title": "Toy Story 5"}},
+                {"id": "2", "name": "Broken", "movie": {"id": None, "title": None}},
+                {"id": "3", "name": "Vaiana", "movie": {"id": "8", "title": "Vaiana"}},
+            ],
+        }
+
+        shows = await kinoheld_service.search_shows(ShowSearchParams(cinema_id="123"))
+
+        assert [s.id for s in shows] == ["1", "2", "3"]
+        # The screening survives; only its unusable movie record is dropped.
+        assert shows[1].movie is None
+        assert shows[1].name == "Broken"
+
+    async def test_unsalvageable_record_is_skipped(
+        self,
+        kinoheld_service: KinoheldService,
+        mock_graphql_client: AsyncMock,
+    ):
+        mock_graphql_client.execute.return_value = {
+            "shows": [
+                {"id": "1", "name": "Fine"},
+                {"name": "No id at all"},
+            ],
+        }
+
+        shows = await kinoheld_service.search_shows(ShowSearchParams(cinema_id="123"))
+
+        assert [s.id for s in shows] == ["1"]
+
+    async def test_malformed_cinema_record_is_skipped(
+        self,
+        kinoheld_service: KinoheldService,
+        mock_graphql_client: AsyncMock,
+    ):
+        mock_graphql_client.execute.return_value = {
+            "cinemas": [{"id": "1", "name": "Kino"}, {"name": "no id"}],
+        }
+
+        cinemas = await kinoheld_service.search_cinemas(CinemaSearchParams())
+
+        assert [c.id for c in cinemas] == ["1"]
+
 
 @pytest.mark.asyncio
 class TestGetCinema:

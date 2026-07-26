@@ -44,6 +44,49 @@ class TestRefresh:
         assert (await cache.get_movie("99")).title == "Dune"
         assert (await cache.get_city("7")).name == "Berlin"
 
+    async def test_prewarms_shows_for_the_first_n_cinemas(
+        self,
+        cache: KinoheldCache,
+        mock_service: AsyncMock,
+        monkeypatch,
+    ):
+        """Without this, cached_shows silently stays 0 when no cinema IDs are set."""
+        monkeypatch.setattr(settings, "kinoheld_sync_cinema_ids", [])
+        monkeypatch.setattr(settings, "kinoheld_sync_cinema_count", 2)
+        monkeypatch.setattr(settings, "kinoheld_sync_show_days", 1)
+        mock_service.search_cinemas.return_value = [
+            Cinema(id=str(i), name=f"Kino {i}") for i in range(5)
+        ]
+        mock_service.search_movies.return_value = []
+        mock_service.search_cities.return_value = []
+        mock_service.list_genres.return_value = []
+        mock_service.search_shows.return_value = [Show(id="s1", name="Show")]
+
+        await cache.refresh(mock_service)
+
+        snapshot = cache.snapshot()
+        assert sum(snapshot["shows"].values()) == 2
+        assert {key.split("::")[0] for key in snapshot["shows"]} == {"0", "1"}
+
+    async def test_explicit_cinema_ids_are_merged_with_the_auto_selection(
+        self,
+        cache: KinoheldCache,
+        mock_service: AsyncMock,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(settings, "kinoheld_sync_cinema_ids", ["99"])
+        monkeypatch.setattr(settings, "kinoheld_sync_cinema_count", 1)
+        monkeypatch.setattr(settings, "kinoheld_sync_show_days", 1)
+        mock_service.search_cinemas.return_value = [Cinema(id="0", name="Kino")]
+        mock_service.search_movies.return_value = []
+        mock_service.search_cities.return_value = []
+        mock_service.list_genres.return_value = []
+        mock_service.search_shows.return_value = []
+
+        await cache.refresh(mock_service)
+
+        assert {key.split("::")[0] for key in cache.snapshot()["shows"]} == {"99", "0"}
+
 
 @pytest.mark.asyncio
 class TestSearchCinemas:

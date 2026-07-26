@@ -1,12 +1,70 @@
 """High-level service for the Kinoheld GraphQL API."""
 
-from typing import Any
+import logging
+from collections.abc import Callable
+from typing import Any, TypeVar
+
+from pydantic import BaseModel, ValidationError
 
 from app.schemas.cinema import Cinema, CinemaSearchParams
 from app.schemas.city import City, CitySearchParams
 from app.schemas.movie import Genre, Movie, MovieSearchParams
 from app.schemas.show import Show, ShowSearchParams
 from app.services.graphql_client import GraphQLClient
+
+logger = logging.getLogger(__name__)
+
+ModelT = TypeVar("ModelT", bound=BaseModel)
+
+
+def _parse_items(
+    model: type[ModelT],
+    items: Any,
+    salvage: Callable[[dict[str, Any]], dict[str, Any] | None] | None = None,
+) -> list[ModelT]:
+    """Validate a list of records, salvaging or skipping any the schema rejects.
+
+    Kinoheld occasionally returns partial records — a show whose embedded movie has a
+    null id and title, for instance. Validating the batch as a whole turns one such
+    record into a 500 for the entire cinema, so recover what we can per record.
+    """
+    results: list[ModelT] = []
+    salvaged = 0
+    skipped = 0
+    for item in items or []:
+        try:
+            results.append(model.model_validate(item))
+            continue
+        except ValidationError:
+            pass
+        repaired = salvage(item) if salvage and isinstance(item, dict) else None
+        if repaired is not None:
+            try:
+                results.append(model.model_validate(repaired))
+                salvaged += 1
+                continue
+            except ValidationError:
+                pass
+        skipped += 1
+    if salvaged or skipped:
+        logger.warning(
+            "%s records: salvaged %d, skipped %d",
+            model.__name__,
+            salvaged,
+            skipped,
+        )
+    return results
+
+
+def _drop_unparseable_movie(item: dict[str, Any]) -> dict[str, Any] | None:
+    """Drop a show's embedded movie when it is the only thing failing validation.
+
+    A screening with an unusable movie record is still a real screening: it keeps its
+    time, auditorium and booking link, and the genre backfill can fill the rest in.
+    """
+    if item.get("movie") is None:
+        return None
+    return {**item, "movie": None}
 
 
 class KinoheldService:
@@ -58,7 +116,7 @@ class KinoheldService:
         """
         variables = self._drop_nones(params.model_dump(mode="json", by_alias=True))
         data = await self.client.execute(query, variables=variables)
-        return [Cinema.model_validate(item) for item in data.get("cinemas", [])]
+        return _parse_items(Cinema, data.get("cinemas"))
 
     async def get_cinema(self, cinema_id: str) -> Cinema:
         query = """
@@ -129,7 +187,7 @@ class KinoheldService:
         """
         variables = self._drop_nones(params.model_dump(mode="json", by_alias=True))
         data = await self.client.execute(query, variables=variables)
-        return [Movie.model_validate(item) for item in data.get("movies", [])]
+        return _parse_items(Movie, data.get("movies"))
 
     async def get_movie(self, movie_id: str) -> Movie:
         query = """
@@ -197,7 +255,7 @@ class KinoheldService:
         """
         variables = self._drop_nones(params.model_dump(mode="json", by_alias=True))
         data = await self.client.execute(query, variables=variables)
-        return [Show.model_validate(item) for item in data.get("shows", [])]
+        return _parse_items(Show, data.get("shows"), salvage=_drop_unparseable_movie)
 
     async def get_show(self, show_id: str) -> Show:
         query = """
@@ -251,7 +309,7 @@ class KinoheldService:
         """
         variables = self._drop_nones(params.model_dump(mode="json", by_alias=True))
         data = await self.client.execute(query, variables=variables)
-        return [City.model_validate(item) for item in data.get("cities", [])]
+        return _parse_items(City, data.get("cities"))
 
     async def get_city(self, city_id: str) -> City:
         query = """
@@ -307,7 +365,7 @@ class KinoheldService:
         }
         """
         data = await self.client.execute(query)
-        return [Genre.model_validate(item) for item in data.get("genres", [])]
+        return _parse_items(Genre, data.get("genres"))
 
     # ------------------------------------------------------------------
     # Helpers
