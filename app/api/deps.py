@@ -12,6 +12,9 @@ from app.services.cinetixx_client import CinetixxClient
 from app.services.graphql_client import GraphQLClient
 from app.services.kinoheld import KinoheldService
 from app.services.llm_client import LLMClient
+from app.services.yorck import YorckService
+from app.services.yorck_cache import YorckCache
+from app.services.yorck_client import YorckClient
 
 
 async def get_kinoheld_service(request: Request) -> AsyncGenerator[KinoheldService, None]:
@@ -44,6 +47,22 @@ async def get_cinetixx_cache(request: Request) -> CinetixxCache:
 async def get_cinetixx_cached_service(request: Request) -> CinetixxService:
     """Return the shared Cinetixx service used by the background sync task."""
     return request.app.state.cinetixx_service
+
+
+async def get_yorck_service() -> AsyncGenerator[YorckService, None]:
+    """Yield a YorckService backed by a request-scoped HTTP client."""
+    async with YorckClient() as client:
+        yield YorckService(client)
+
+
+async def get_yorck_cache(request: Request) -> YorckCache:
+    """Return the shared in-memory Yorck cache."""
+    return request.app.state.yorck_cache
+
+
+async def get_yorck_cached_service(request: Request) -> YorckService:
+    """Return the shared Yorck service used by the background sync task."""
+    return request.app.state.yorck_service
 
 
 async def get_llm_client() -> AsyncGenerator[LLMClient, None]:

@@ -13,6 +13,7 @@ from app.schemas.common import Geo, Image, Url
 from app.schemas.movie import Genre, Movie, Person
 from app.schemas.show import Auditorium, DateTimeFormatted, Show, ShowFlag
 from app.schemas.unified import UnifiedCinema, UnifiedCity, UnifiedGenre, UnifiedMovie, UnifiedShow
+from app.schemas.yorck import YorckCinema, YorckCity, YorckGenre, YorckMovie, YorckShow
 
 
 def _url(value: str | None) -> Url | None:
@@ -156,3 +157,84 @@ def kinoheld_genre_to_unified(genre: Genre) -> UnifiedGenre:
 def cinetixx_genre_to_unified(genre: CinetixxGenre) -> UnifiedGenre:
     """Map a Cinetixx genre/category into the unified schema."""
     return UnifiedGenre(id=genre.id, name=genre.name, source="cinetixx", sourceId=genre.id)
+
+
+def yorck_cinema_to_unified(cinema: YorckCinema) -> UnifiedCinema:
+    """Map a Yorck cinema into the unified schema."""
+    payload = Cinema(
+        id=cinema.id,
+        name=cinema.name,
+        city=CitySummary(id=None, name=cinema.city),
+        street=cinema.address,
+        postcode=cinema.post_code,
+        phonenumber=cinema.phone,
+        coordinates=(
+            Geo(latitude=cinema.latitude, longitude=cinema.longitude)
+            if cinema.latitude is not None and cinema.longitude is not None
+            else None
+        ),
+        detailUrl=_url(cinema.detail_url),
+        thumbnail=_image(cinema.hero_image_url),
+        heroImage=_image(cinema.hero_image_url),
+    ).model_dump(by_alias=True)
+    return UnifiedCinema(**payload, source="yorck", sourceId=cinema.id)
+
+
+def yorck_movie_to_unified(movie: YorckMovie) -> UnifiedMovie:
+    """Map a Yorck movie/special into the unified schema."""
+    payload = {
+        "id": movie.id,
+        "title": movie.title,
+        "description": movie.description,
+        "additionalDescription": movie.tagline,
+        "duration": movie.runtime,
+        "genres": [Genre(name=name) for name in movie.genres],
+        "directors": [Person(name=name) for name in movie.directors if name],
+        "actors": [Person(name=name) for name in movie.actors if name],
+        "productionYear": str(movie.year) if movie.year is not None else None,
+        "thumb": _image(movie.poster_url or movie.hero_image_url),
+        "heroImage": _image(movie.hero_image_url or movie.poster_url),
+        "detailUrl": _url(movie.detail_url),
+        "urlSlug": movie.slug,
+        "imdbRating": None,
+        "imdbVotes": None,
+    }
+    return UnifiedMovie(**payload, source="yorck", sourceId=movie.id)
+
+
+def yorck_show_to_unified(show: YorckShow) -> UnifiedShow:
+    """Map a Yorck show into the unified schema."""
+    beginning = None
+    if show.begins_at is not None:
+        beginning = DateTimeFormatted(
+            formatted=show.begins_at.isoformat(),
+            timestamp=int(show.begins_at.timestamp()),
+        )
+
+    movie = None
+    if show.movie_id or show.movie_title:
+        movie = Movie(id=show.movie_id or show.id, title=show.movie_title or show.id)
+
+    payload = {
+        "id": show.id,
+        "name": show.movie_title or show.id,
+        "beginning": beginning,
+        "admission": None,
+        "duration": str(show.runtime) if show.runtime is not None else None,
+        "flags": [ShowFlag(name=flag) for flag in show.flags],
+        "detailUrl": _url(show.booking_url),
+        "isSoldOut": None,
+        "movie": movie,
+        "auditorium": None,
+    }
+    return UnifiedShow(**payload, source="yorck", sourceId=show.id)
+
+
+def yorck_city_to_unified(city: YorckCity) -> UnifiedCity:
+    """Map a Yorck city into the unified schema."""
+    return UnifiedCity(id=city.id, name=city.name, source="yorck", sourceId=city.id)
+
+
+def yorck_genre_to_unified(genre: YorckGenre) -> UnifiedGenre:
+    """Map a Yorck genre/label into the unified schema."""
+    return UnifiedGenre(id=genre.id, name=genre.name, source="yorck", sourceId=genre.id)

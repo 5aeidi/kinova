@@ -74,3 +74,28 @@ curl -s "${BASE_URL}${API_PREFIX}/cities/me" | jq .
 echo ""
 echo "=== List genres ==="
 curl -s "${BASE_URL}${API_PREFIX}/genres" | jq .
+
+echo ""
+echo "=== Yorck: list cinemas ==="
+curl -s "${BASE_URL}${API_PREFIX}/yorck/cinemas" | jq .
+
+echo ""
+echo "=== Yorck: list movies ==="
+curl -s -G "${BASE_URL}${API_PREFIX}/yorck/movies" \
+  --data-urlencode "limit=5" | jq .
+
+echo ""
+echo "=== Yorck: shows for a cinema ==="
+curl -s -G "${BASE_URL}${API_PREFIX}/yorck/shows" \
+  --data-urlencode "cinemaId=babylon-kreuzberg" \
+  --data-urlencode "limit=5" | jq .
+
+echo ""
+echo "=== Internal Yorck: health ==="
+curl -s "${BASE_URL}${API_PREFIX}/internal/yorck/health" | jq .
+
+echo ""
+echo "=== Unified: movies from Yorck only ==="
+curl -s -G "${BASE_URL}${API_PREFIX}/internal/unified/movies" \
+  --data-urlencode "source=yorck" \
+  --data-urlencode "limit=5" | jq .

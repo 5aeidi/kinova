@@ -13,6 +13,7 @@ from app.api.v1.endpoints import (
     search,
     shows,
     unified,
+    yorck,
 )
 
 api_router = APIRouter()
@@ -25,4 +26,5 @@ api_router.include_router(shows.router)
 api_router.include_router(cities.router)
 api_router.include_router(genres.router)
 api_router.include_router(cinetixx.router)
+api_router.include_router(yorck.router)
 api_router.include_router(unified.router)

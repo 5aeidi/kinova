@@ -12,6 +12,8 @@ from app.api.deps import (
     get_kinoheld_cache,
     get_kinoheld_cached_service,
     get_kinoheld_service,
+    get_yorck_cache,
+    get_yorck_cached_service,
 )
 from app.core.config import settings
 from app.schemas.cinema import Cinema, CinemaSearchParams
@@ -33,10 +35,24 @@ from app.schemas.cinetixx import (
 from app.schemas.city import City, CitySearchParams
 from app.schemas.movie import Genre, Movie, MovieSearchParams
 from app.schemas.show import Show, ShowSearchParams
+from app.schemas.yorck import (
+    YorckCinema,
+    YorckCinemaSearchParams,
+    YorckCity,
+    YorckCitySearchParams,
+    YorckGenre,
+    YorckGenreSearchParams,
+    YorckMovie,
+    YorckMovieSearchParams,
+    YorckShow,
+    YorckShowSearchParams,
+)
 from app.services.cache import KinoheldCache
 from app.services.cinetixx import CinetixxService
 from app.services.cinetixx_cache import CinetixxCache
 from app.services.kinoheld import KinoheldService
+from app.services.yorck import YorckService
+from app.services.yorck_cache import YorckCache
 
 router = APIRouter(prefix="/internal", tags=["internal"])
 
@@ -45,6 +61,14 @@ CachedServiceDep = Annotated[KinoheldService, Depends(get_kinoheld_cached_servic
 LiveServiceDep = Annotated[KinoheldService, Depends(get_kinoheld_service)]
 CinetixxCacheDep = Annotated[CinetixxCache, Depends(get_cinetixx_cache)]
 CinetixxCachedServiceDep = Annotated[CinetixxService, Depends(get_cinetixx_cached_service)]
+YorckCacheDep = Annotated[YorckCache, Depends(get_yorck_cache)]
+YorckCachedServiceDep = Annotated[YorckService, Depends(get_yorck_cached_service)]
+
+
+async def _ensure_yorck_cached(cache: YorckCache, service: YorckService) -> None:
+    """Populate the Yorck cache when a request arrives before the first refresh."""
+    if not await cache.is_populated():
+        await cache.refresh(service)
 
 
 async def _ensure_cinetixx_cached(
@@ -422,3 +446,138 @@ async def list_cinetixx_genres_internal(
     await _ensure_cinetixx_cached(cache, service, mandator_id)
     params = CinetixxGenreSearchParams(mandator_id=mandator_id, search=search, limit=limit)
     return await cache.list_genres(params)
+
+
+# ------------------------------------------------------------------
+# Yorck cache-backed endpoints
+# ------------------------------------------------------------------
+@router.get("/yorck/health")
+async def yorck_health_check(cache: YorckCacheDep) -> dict:
+    """Health probe that reports Yorck cache status."""
+    snapshot = cache.snapshot()
+    return {
+        "status": "ok",
+        "source": "yorck-cache",
+        "last_refresh": snapshot["last_refresh"],
+        "cached_cinemas": snapshot["cinemas"],
+        "cached_movies": snapshot["movies"],
+        "cached_shows": snapshot["shows"],
+        "cached_cities": snapshot["cities"],
+        "cached_genres": snapshot["genres"],
+    }
+
+
+@router.get("/yorck/cinemas", response_model=list[YorckCinema])
+async def list_yorck_cinemas_internal(
+    cache: YorckCacheDep,
+    service: YorckCachedServiceDep,
+    search: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+) -> list[YorckCinema]:
+    """Search cached Yorck cinemas."""
+    await _ensure_yorck_cached(cache, service)
+    return await cache.search_cinemas(YorckCinemaSearchParams(search=search, limit=limit))
+
+
+@router.get("/yorck/cinemas/{cinema_id}", response_model=YorckCinema)
+async def get_yorck_cinema_internal(
+    cache: YorckCacheDep,
+    service: YorckCachedServiceDep,
+    cinema_id: Annotated[str, Path(..., description="Yorck cinema slug or Vista ID")],
+) -> YorckCinema:
+    """Fetch a cached Yorck cinema by slug or Vista ID."""
+    await _ensure_yorck_cached(cache, service)
+    return await cache.get_cinema(cinema_id)
+
+
+@router.get("/yorck/movies", response_model=list[YorckMovie])
+async def list_yorck_movies_internal(
+    cache: YorckCacheDep,
+    service: YorckCachedServiceDep,
+    search: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+) -> list[YorckMovie]:
+    """Search cached Yorck movies/specials."""
+    await _ensure_yorck_cached(cache, service)
+    return await cache.search_movies(YorckMovieSearchParams(search=search, limit=limit))
+
+
+@router.get("/yorck/movies/{movie_id}", response_model=YorckMovie)
+async def get_yorck_movie_internal(
+    cache: YorckCacheDep,
+    service: YorckCachedServiceDep,
+    movie_id: Annotated[str, Path(..., description="Yorck movie ID, slug, or Vista ID")],
+) -> YorckMovie:
+    """Fetch a cached Yorck movie/special by ID."""
+    await _ensure_yorck_cached(cache, service)
+    return await cache.get_movie(movie_id)
+
+
+@router.get("/yorck/shows", response_model=list[YorckShow])
+async def list_yorck_shows_internal(
+    cache: YorckCacheDep,
+    service: YorckCachedServiceDep,
+    date: Annotated[dt.date | None, Query(description="Start date in YYYY-MM-DD format")] = None,
+    days: Annotated[int | None, Query(ge=1, le=30)] = None,
+    movie_id: Annotated[str | None, Query(alias="movieId")] = None,
+    cinema_id: Annotated[str | None, Query(alias="cinemaId")] = None,
+    search: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+) -> list[YorckShow]:
+    """Search cached Yorck shows."""
+    await _ensure_yorck_cached(cache, service)
+    params = YorckShowSearchParams(
+        date=date,
+        days=days,
+        movie_id=movie_id,
+        cinema_id=cinema_id,
+        search=search,
+        limit=limit,
+    )
+    return await cache.search_shows(params)
+
+
+@router.get("/yorck/shows/{show_id}", response_model=YorckShow)
+async def get_yorck_show_internal(
+    cache: YorckCacheDep,
+    service: YorckCachedServiceDep,
+    show_id: Annotated[str, Path(..., description="Yorck session ID")],
+) -> YorckShow:
+    """Fetch a cached Yorck show by session ID."""
+    await _ensure_yorck_cached(cache, service)
+    return await cache.get_show(show_id)
+
+
+@router.get("/yorck/cities", response_model=list[YorckCity])
+async def list_yorck_cities_internal(
+    cache: YorckCacheDep,
+    service: YorckCachedServiceDep,
+    search: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+) -> list[YorckCity]:
+    """Search cached Yorck cities."""
+    await _ensure_yorck_cached(cache, service)
+    return await cache.search_cities(YorckCitySearchParams(search=search, limit=limit))
+
+
+@router.get("/yorck/cities/{city_id}", response_model=YorckCity)
+async def get_yorck_city_internal(
+    cache: YorckCacheDep,
+    service: YorckCachedServiceDep,
+    city_id: Annotated[str, Path(..., description="Yorck city ID or name")],
+) -> YorckCity:
+    """Fetch a cached Yorck city by ID or name."""
+    await _ensure_yorck_cached(cache, service)
+    return await cache.get_city(city_id)
+
+
+@router.get("/yorck/genres", response_model=list[YorckGenre])
+async def list_yorck_genres_internal(
+    cache: YorckCacheDep,
+    service: YorckCachedServiceDep,
+    search: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=1000)] = 100,
+) -> list[YorckGenre]:
+    """List cached Yorck genres/labels."""
+    await _ensure_yorck_cached(cache, service)
+    return await cache.list_genres(YorckGenreSearchParams(search=search, limit=limit))

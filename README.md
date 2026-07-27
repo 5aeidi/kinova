@@ -6,7 +6,7 @@
 
 **Kinova** is a small, production-ready **FastAPI** wrapper around the **Kinoheld GraphQL API**.
 
-It exposes clean REST routes for cinemas, movies, shows, cities, and genres while handling GraphQL introspection, error mapping, connection pooling, and Pydantic validation for you. It also includes source-specific Cinetixx routes and cache-backed internal Cinetixx routes. Cinetixx mandators are discovered automatically from its public cinema index.
+It exposes clean REST routes for cinemas, movies, shows, cities, and genres while handling GraphQL introspection, error mapping, connection pooling, and Pydantic validation for you. It also includes source-specific Cinetixx and Yorck Kinogruppe routes plus cache-backed internal variants. Cinetixx mandators are discovered automatically from its public cinema index, and the Yorck programme is fetched from the yorck.de public Next.js data endpoints.
 
 ## Why this exists
 
@@ -60,7 +60,13 @@ All routes are prefixed with `/api/v1`.
 | GET | `/cinetixx/shows` | List Cinetixx shows derived from program data |
 | GET | `/cinetixx/cities` | List Cinetixx cities derived from program data |
 | GET | `/cinetixx/genres` | List Cinetixx genres/categories derived from program data |
+| GET | `/yorck/cinemas` | List Yorck Kinogruppe cinemas |
+| GET | `/yorck/movies` | List Yorck movies/specials with rich metadata |
+| GET | `/yorck/shows` | List Yorck shows/sessions |
+| GET | `/yorck/cities` | List Yorck cities |
+| GET | `/yorck/genres` | List Yorck genres/labels |
 | GET | `/internal/cinetixx/*` | Cache-backed Cinetixx resource routes |
+| GET | `/internal/yorck/*` | Cache-backed Yorck resource routes |
 | GET | `/internal/unified/*` | Cache-backed unified resources with Kinoheld-shaped fields plus `source` metadata |
 
 ### Example requests

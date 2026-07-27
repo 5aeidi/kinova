@@ -23,6 +23,7 @@ This document is the single source of truth for frontend developers integrating 
   - [Shows](#shows)
   - [Genres](#genres)
   - [Cinetixx](#cinetixx)
+  - [Yorck](#yorck)
 - [Frontend integration tips](#frontend-integration-tips)
 - [Generating TypeScript types](#generating-typescript-types)
 - [Quick command reference](#quick-command-reference)
@@ -38,7 +39,7 @@ All routes are prefixed with `/api/v1`.
 | Local dev   | `http://localhost:8000/api/v1` |
 | Production  | Configured per deployment (e.g. `https://api.example.com/api/v1`) |
 
-The API is read-only and primarily wraps the upstream [Kinoheld](https://www.kinoheld.de/) GraphQL endpoint. Source-specific Cinetixx routes are namespaced under `/cinetixx`.
+The API is read-only and primarily wraps the upstream [Kinoheld](https://www.kinoheld.de/) GraphQL endpoint. Source-specific Cinetixx routes are namespaced under `/cinetixx`, and Yorck Kinogruppe routes under `/yorck`.
 
 ---
 
@@ -174,6 +175,10 @@ When Kinoheld returns a GraphQL-level error (e.g. an invalid enum value), the re
 | `GET /cinetixx/{resource}/{id}` | `200` | `422` | `404` | `500` |
 | `GET /internal/cinetixx/{resource}` | `200` | `422` | — | `500` |
 | `GET /internal/cinetixx/{resource}/{id}` | `200` | `422` | `404` | `500` |
+| `GET /yorck/{resource}` | `200` | `422` | — | `502` |
+| `GET /yorck/{resource}/{id}` | `200` | `422` | `404` | `502` |
+| `GET /internal/yorck/{resource}` | `200` | `422` | — | `500` |
+| `GET /internal/yorck/{resource}/{id}` | `200` | `422` | `404` | `500` |
 | `GET /internal/unified/{resource}` | `200` | `422` | — | `500` |
 | `GET /internal/unified/{resource}/{id}` | `200` | `422` | `404` | `500` |
 
@@ -1004,11 +1009,42 @@ JSON arrays or comma-separated values, for example
 override the default `a-z`/`0-9` search terms if Cinetixx adds cinemas whose
 searchable fields do not contain those characters.
 
+## Yorck
+
+Yorck Kinogruppe (Berlin) data is read from yorck.de's public Next.js data endpoints, which serve the full programme as structured JSON — no scraping and no credentials. The Next.js `buildId` is resolved automatically and refreshed when Yorck deploys a new build.
+
+### Normalized Yorck Resource Routes
+
+| Method | Route | Description |
+|--------|-------|-------------|
+| GET | `/yorck/cinemas` | Yorck cinemas with address, district, coordinates, phone, auditorium count, and accessibility |
+| GET | `/yorck/cinemas/{cinema_id}` | One cinema by slug or Vista ID |
+| GET | `/yorck/movies` | Films, specials, and presale films with rich metadata (directors, cast, description, FSK, TMDB ID, trailer, poster) |
+| GET | `/yorck/movies/{movie_id}` | One movie by ID, slug, or Vista ID |
+| GET | `/yorck/shows` | Sessions with ISO-8601 start times and `formats` (`OV`/`OmU`/`OmeU`/`DF`) |
+| GET | `/yorck/shows/{show_id}` | One session by ID |
+| GET | `/yorck/cities` | Cities derived from cinema addresses |
+| GET | `/yorck/genres` | Genres/labels derived from the programme |
+
+List routes accept `search` and `limit`; `/yorck/shows` also accepts `date`, `days`, `movieId`, and `cinemaId` like the Cinetixx show routes. Movies carry `isSpecial` (curated series/events) and `isPresale` (coming-soon films without sessions yet) flags.
+
+### Internal Yorck Cache Routes
+
+Cache-backed Yorck routes live under `/internal/yorck/*` and mirror the normalized public routes, plus `/internal/yorck/health` for cache status:
+
+```bash
+curl "http://localhost:8000/api/v1/internal/yorck/health"
+curl "http://localhost:8000/api/v1/internal/yorck/movies?search=dreams"
+curl "http://localhost:8000/api/v1/internal/yorck/shows?cinemaId=babylon-kreuzberg"
+```
+
+The cache refreshes hourly by default (`YORCK_SYNC_INTERVAL_SECONDS`). Each refresh fetches the cinema list and full programme, then enriches every film from its detail page (directors, cast, descriptions, trailers, TMDB IDs); set `YORCK_FETCH_FILM_DETAILS=false` to skip enrichment, and tune `YORCK_DETAIL_CONCURRENCY` (default `8`) for the enrichment fan-out.
+
 ## Unified Internal Layer
 
 Unified cache-backed routes live under `/internal/unified/*`. They combine cached provider data into the same Kinoheld-shaped response models and add a `source` tag plus `sourceId` metadata to every item.
 
-The unified `id` is source-prefixed, for example `kinoheld:123` or `cinetixx:123`. The original upstream ID is also returned as `sourceId`.
+The unified `id` is source-prefixed, for example `kinoheld:123`, `cinetixx:123`, or `yorck:dreams`. The original upstream ID is also returned as `sourceId`.
 
 | Method | Route | Description |
 |--------|-------|-------------|
@@ -1026,7 +1062,7 @@ Common query parameters:
 
 | Parameter | Description |
 |-----------|-------------|
-| `source` | Optional source filter. Currently `kinoheld`, `cinetixx`, or omitted/`all`. |
+| `source` | Optional source filter. Currently `kinoheld`, `cinetixx`, `yorck`, or omitted/`all`. |
 | `mandatorId` | Optional Cinetixx mandator ID. Used for Cinetixx on-demand cache fill. |
 | `search` | Free-text search where supported by the resource. |
 | `limit` | Max results, default `100`, max `1000`. |

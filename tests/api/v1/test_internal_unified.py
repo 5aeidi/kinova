@@ -1,5 +1,6 @@
 """Tests for unified internal cache-backed endpoints."""
 
+import datetime as dt
 import json
 from unittest.mock import AsyncMock
 
@@ -16,6 +17,8 @@ from app.services.cache import KinoheldCache
 from app.services.cinetixx import CinetixxService
 from app.services.cinetixx_cache import CinetixxCache
 from app.services.unified import cinetixx_cinema_to_unified
+from app.services.yorck import YorckService
+from app.services.yorck_cache import YorckCache
 from tests.services.test_cinetixx_service import SAMPLE_ROW
 
 
@@ -53,6 +56,11 @@ def app_with_unified_caches():
     )
     cinetixx_service = CinetixxService(mock_cinetixx_client)
 
+    # An already-populated (empty) Yorck cache keeps unified tests off the network.
+    yorck_cache = YorckCache()
+    yorck_cache._last_refresh = dt.datetime.now(tz=dt.timezone.utc)
+    yorck_service = YorckService(AsyncMock())
+
     async def override_kinoheld_cache():
         return kinoheld_cache
 
@@ -62,15 +70,25 @@ def app_with_unified_caches():
     async def override_cinetixx_service():
         return cinetixx_service
 
+    async def override_yorck_cache():
+        return yorck_cache
+
+    async def override_yorck_service():
+        return yorck_service
+
     from app.api.deps import (
         get_cinetixx_cache,
         get_cinetixx_cached_service,
         get_kinoheld_cache,
+        get_yorck_cache,
+        get_yorck_cached_service,
     )
 
     app.dependency_overrides[get_kinoheld_cache] = override_kinoheld_cache
     app.dependency_overrides[get_cinetixx_cache] = override_cinetixx_cache
     app.dependency_overrides[get_cinetixx_cached_service] = override_cinetixx_service
+    app.dependency_overrides[get_yorck_cache] = override_yorck_cache
+    app.dependency_overrides[get_yorck_cached_service] = override_yorck_service
     yield app, mock_cinetixx_client
     app.dependency_overrides.clear()
 

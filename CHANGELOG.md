@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Frontend API: Yorck Kinogruppe
+
+#### Added
+
+- Yorck source routes under `/api/v1/yorck/*`: `/cinemas`, `/movies`, `/shows`, `/cities`, and `/genres` normalized from Yorck's public Next.js data endpoints (no scraping; the site serves its full programme as JSON).
+- Cache-backed Yorck routes under `/api/v1/internal/yorck/*` plus `/api/v1/internal/yorck/health` for cache status.
+- Yorck results in the unified routes: `source=yorck` filters them, `yorck:<id>` prefixed IDs address them, and omitting `source` now returns Kinoheld, Cinetixx, and Yorck together.
+- Rich Yorck movie metadata merged from each film's detail page: directors, cast, writers, description, countries, year, FSK, content descriptors, distributor, TMDB ID, trailer, poster, and hero image. Special events and presale ("coming soon") films are included and flagged via `isSpecial`/`isPresale`.
+- Yorck shows carry ISO-8601 start times and `formats` (`OV`/`OmU`/`OmeU`/`DF`) mapped directly onto the existing show flags.
+
+#### Changed
+
+- Yorck cache population runs in the background at startup and refreshes hourly by default (`YORCK_SYNC_INTERVAL_SECONDS`), mirroring Cinetixx. The Next.js `buildId` is resolved automatically and re-resolved when Yorck deploys a new build.
+
 ### Frontend API: Cinetixx and Unified Data
 
 #### Added

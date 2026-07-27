@@ -19,6 +19,9 @@ from app.services.cinetixx_client import CinetixxClient
 from app.services.graphql_client import GraphQLClient
 from app.services.kinoheld import KinoheldService
 from app.services.sync import run_periodic_sync
+from app.services.yorck import YorckService
+from app.services.yorck_cache import YorckCache
+from app.services.yorck_client import YorckClient
 
 logging.basicConfig(
     level=logging.DEBUG if settings.debug else logging.INFO,
@@ -35,12 +38,17 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.kinoheld_cache = cache
     cinetixx_cache = CinetixxCache()
     app.state.cinetixx_cache = cinetixx_cache
+    yorck_cache = YorckCache()
+    app.state.yorck_cache = yorck_cache
 
     sync_task: asyncio.Task[None] | None = None
     cinetixx_sync_task: asyncio.Task[None] | None = None
     cinetixx_initial_refresh_task: asyncio.Task[None] | None = None
+    yorck_sync_task: asyncio.Task[None] | None = None
+    yorck_initial_refresh_task: asyncio.Task[None] | None = None
     client: GraphQLClient | None = None
     cinetixx_client: CinetixxClient | None = None
+    yorck_client: YorckClient | None = None
 
     try:
         client = GraphQLClient()
@@ -49,6 +57,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         cinetixx_client = CinetixxClient()
         cinetixx_service = CinetixxService(cinetixx_client)
         app.state.cinetixx_service = cinetixx_service
+        yorck_client = YorckClient()
+        yorck_service = YorckService(yorck_client)
+        app.state.yorck_service = yorck_service
 
         logger.info("Performing initial Kinoheld cache refresh")
         with contextlib.suppress(Exception):
@@ -57,6 +68,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         cinetixx_initial_refresh_task = asyncio.create_task(
             cinetixx_cache.refresh(cinetixx_service),
             name="cinetixx-initial-cache-refresh",
+        )
+        logger.info("Scheduling initial Yorck cache refresh in the background")
+        yorck_initial_refresh_task = asyncio.create_task(
+            yorck_cache.refresh(yorck_service),
+            name="yorck-initial-cache-refresh",
         )
 
         sync_task = asyncio.create_task(
@@ -67,6 +83,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 cinetixx_cache,
                 cinetixx_service,
                 settings.cinetixx_sync_interval_seconds,
+            ),
+        )
+        yorck_sync_task = asyncio.create_task(
+            run_periodic_sync(
+                yorck_cache,
+                yorck_service,
+                settings.yorck_sync_interval_seconds,
             ),
         )
         yield
@@ -83,10 +106,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             cinetixx_initial_refresh_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await cinetixx_initial_refresh_task
+        if yorck_sync_task is not None:
+            yorck_sync_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await yorck_sync_task
+        if yorck_initial_refresh_task is not None:
+            yorck_initial_refresh_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await yorck_initial_refresh_task
         if client is not None:
             await client.close()
         if cinetixx_client is not None:
             await cinetixx_client.close()
+        if yorck_client is not None:
+            await yorck_client.close()
 
 
 def create_application() -> FastAPI:

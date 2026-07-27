@@ -115,6 +115,47 @@ class Settings(BaseSettings):
         description="Default number of Cinetixx show days to return when filtering dates",
     )
 
+    # Yorck Kinogruppe public Next.js data endpoints
+    yorck_base_url: str = Field(
+        default="https://www.yorck.de",
+        description="Yorck website base URL serving the public Next.js data endpoints",
+    )
+    yorck_locale: str = Field(
+        default="en",
+        description="Yorck content locale used in data endpoint paths",
+    )
+    yorck_request_timeout: float = Field(
+        default=30.0,
+        description="Yorck HTTP request timeout in seconds",
+    )
+    yorck_pool_limits: int = Field(
+        default=10,
+        description="Max keepalive connections in the Yorck HTTP connection pool",
+    )
+    yorck_sync_interval_seconds: int = Field(
+        default=3600,
+        description="How often to refresh the local Yorck cache",
+    )
+    yorck_fetch_film_details: bool = Field(
+        default=True,
+        description=(
+            "Fetch each film's detail page during refresh for directors, cast, "
+            "descriptions, trailers, and TMDB IDs missing from the programme list"
+        ),
+    )
+    yorck_detail_concurrency: int = Field(
+        default=8,
+        ge=1,
+        le=32,
+        description="Max concurrent Yorck film-detail requests during cache refresh",
+    )
+    yorck_sync_show_days: int = Field(
+        default=7,
+        ge=1,
+        le=30,
+        description="Default number of Yorck show days to return when filtering dates",
+    )
+
     # Local cache / sync settings
     kinoheld_sync_interval_seconds: int = Field(
         default=600,

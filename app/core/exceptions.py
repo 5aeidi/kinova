@@ -46,6 +46,20 @@ class CinetixxNotFoundError(KinovaError):
         super().__init__(message, status.HTTP_404_NOT_FOUND)
 
 
+class YorckAPIError(KinovaError):
+    """Raised when the upstream Yorck website returns an error."""
+
+    def __init__(self, message: str):
+        super().__init__(message, status.HTTP_502_BAD_GATEWAY)
+
+
+class YorckNotFoundError(KinovaError):
+    """Raised when a requested Yorck resource is not found."""
+
+    def __init__(self, message: str = "Yorck resource not found"):
+        super().__init__(message, status.HTTP_404_NOT_FOUND)
+
+
 def _apply_cors_headers(request: Request, response: JSONResponse) -> JSONResponse:
     """Mirror CORS headers on error responses.
 

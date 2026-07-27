@@ -10,6 +10,8 @@ from app.api.deps import (
     get_cinetixx_cached_service,
     get_kinoheld_cache,
     get_kinoheld_cached_service,
+    get_yorck_cache,
+    get_yorck_cached_service,
 )
 from app.core.config import settings
 from app.schemas.cinema import CinemaSearchParams
@@ -24,6 +26,13 @@ from app.schemas.city import CitySearchParams
 from app.schemas.movie import MovieSearchParams
 from app.schemas.show import ShowSearchParams
 from app.schemas.unified import UnifiedCinema, UnifiedCity, UnifiedGenre, UnifiedMovie, UnifiedShow
+from app.schemas.yorck import (
+    YorckCinemaSearchParams,
+    YorckCitySearchParams,
+    YorckGenreSearchParams,
+    YorckMovieSearchParams,
+    YorckShowSearchParams,
+)
 from app.services.cache import KinoheldCache
 from app.services.cinetixx import CinetixxService
 from app.services.cinetixx_cache import CinetixxCache
@@ -39,7 +48,14 @@ from app.services.unified import (
     kinoheld_genre_to_unified,
     kinoheld_movie_to_unified,
     kinoheld_show_to_unified,
+    yorck_cinema_to_unified,
+    yorck_city_to_unified,
+    yorck_genre_to_unified,
+    yorck_movie_to_unified,
+    yorck_show_to_unified,
 )
+from app.services.yorck import YorckService
+from app.services.yorck_cache import YorckCache
 
 router = APIRouter(prefix="/internal/unified", tags=["internal", "unified"])
 
@@ -47,8 +63,10 @@ KinoheldCacheDep = Annotated[KinoheldCache, Depends(get_kinoheld_cache)]
 KinoheldServiceDep = Annotated[KinoheldService, Depends(get_kinoheld_cached_service)]
 CinetixxCacheDep = Annotated[CinetixxCache, Depends(get_cinetixx_cache)]
 CinetixxServiceDep = Annotated[CinetixxService, Depends(get_cinetixx_cached_service)]
+YorckCacheDep = Annotated[YorckCache, Depends(get_yorck_cache)]
+YorckServiceDep = Annotated[YorckService, Depends(get_yorck_cached_service)]
 
-SUPPORTED_SOURCES = {"kinoheld", "cinetixx"}
+SUPPORTED_SOURCES = {"kinoheld", "cinetixx", "yorck"}
 
 
 def _requested_sources(source: str | None) -> set[str]:
@@ -83,6 +101,15 @@ async def _ensure_cinetixx_cached(
             await cache.cache_mandator(service, mandator_id)
         return
     if not cache.snapshot()["mandators"] and settings.cinetixx_sync_mandator_ids:
+        await cache.refresh(service)
+
+
+async def _ensure_yorck_cached(
+    cache: YorckCache,
+    service: YorckService,
+    sources: set[str],
+) -> None:
+    if "yorck" in sources and not await cache.is_populated():
         await cache.refresh(service)
 
 
@@ -130,12 +157,15 @@ async def list_unified_cinemas(
     kinoheld_service: KinoheldServiceDep,
     cinetixx_cache: CinetixxCacheDep,
     cinetixx_service: CinetixxServiceDep,
+    yorck_cache: YorckCacheDep,
+    yorck_service: YorckServiceDep,
     source: Annotated[str | None, Query(description="Optional source tag filter")] = None,
     mandator_id: Annotated[int | None, Query(alias="mandatorId", gt=0)] = None,
 ) -> list[UnifiedCinema]:
     """List unified cinemas from cached providers."""
     sources = _requested_sources(source)
     await _ensure_cinetixx_cached(cinetixx_cache, cinetixx_service, sources, mandator_id)
+    await _ensure_yorck_cached(yorck_cache, yorck_service, sources)
 
     results: list[UnifiedCinema] = []
     if "kinoheld" in sources:
@@ -152,6 +182,11 @@ async def list_unified_cinemas(
             ),
         )
         results.extend(cinetixx_cinema_to_unified(item) for item in cinetixx)
+    if "yorck" in sources:
+        yorck = await yorck_cache.search_cinemas(
+            YorckCinemaSearchParams(search=params.search or params.location, limit=params.limit),
+        )
+        results.extend(yorck_cinema_to_unified(item) for item in yorck)
 
     return _sort_by_name(results)[: params.limit]
 
@@ -161,6 +196,8 @@ async def get_unified_cinema(
     kinoheld_cache: KinoheldCacheDep,
     cinetixx_cache: CinetixxCacheDep,
     cinetixx_service: CinetixxServiceDep,
+    yorck_cache: YorckCacheDep,
+    yorck_service: YorckServiceDep,
     cinema_id: Annotated[str, Path(..., description="Unified or provider cinema ID")],
     source: Annotated[str | None, Query(description="Optional source tag filter")] = None,
     mandator_id: Annotated[int | None, Query(alias="mandatorId", gt=0)] = None,
@@ -169,6 +206,7 @@ async def get_unified_cinema(
     id_source, source_id = _split_unified_id(cinema_id)
     sources = _requested_sources(source or id_source)
     await _ensure_cinetixx_cached(cinetixx_cache, cinetixx_service, sources, mandator_id)
+    await _ensure_yorck_cached(yorck_cache, yorck_service, sources)
 
     if "kinoheld" in sources:
         with contextlib.suppress(Exception):
@@ -178,6 +216,9 @@ async def get_unified_cinema(
             return cinetixx_cinema_to_unified(
                 await cinetixx_cache.get_cinema(source_id, mandator_id)
             )
+    if "yorck" in sources:
+        with contextlib.suppress(Exception):
+            return yorck_cinema_to_unified(await yorck_cache.get_cinema(source_id))
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unified cinema not found")
 
 
@@ -187,12 +228,15 @@ async def list_unified_movies(
     kinoheld_cache: KinoheldCacheDep,
     cinetixx_cache: CinetixxCacheDep,
     cinetixx_service: CinetixxServiceDep,
+    yorck_cache: YorckCacheDep,
+    yorck_service: YorckServiceDep,
     source: Annotated[str | None, Query(description="Optional source tag filter")] = None,
     mandator_id: Annotated[int | None, Query(alias="mandatorId", gt=0)] = None,
 ) -> list[UnifiedMovie]:
     """List unified movies/events from cached providers."""
     sources = _requested_sources(source)
     await _ensure_cinetixx_cached(cinetixx_cache, cinetixx_service, sources, mandator_id)
+    await _ensure_yorck_cached(yorck_cache, yorck_service, sources)
 
     results: list[UnifiedMovie] = []
     if "kinoheld" in sources:
@@ -208,6 +252,11 @@ async def list_unified_movies(
             ),
         )
         results.extend(cinetixx_movie_to_unified(item) for item in cinetixx)
+    if "yorck" in sources:
+        yorck = await yorck_cache.search_movies(
+            YorckMovieSearchParams(search=params.search, limit=params.limit),
+        )
+        results.extend(yorck_movie_to_unified(item) for item in yorck)
 
     return _sort_by_name(results)[: params.limit]
 
@@ -217,6 +266,8 @@ async def get_unified_movie(
     kinoheld_cache: KinoheldCacheDep,
     cinetixx_cache: CinetixxCacheDep,
     cinetixx_service: CinetixxServiceDep,
+    yorck_cache: YorckCacheDep,
+    yorck_service: YorckServiceDep,
     movie_id: Annotated[str, Path(..., description="Unified or provider movie/event ID")],
     source: Annotated[str | None, Query(description="Optional source tag filter")] = None,
     mandator_id: Annotated[int | None, Query(alias="mandatorId", gt=0)] = None,
@@ -225,6 +276,7 @@ async def get_unified_movie(
     id_source, source_id = _split_unified_id(movie_id)
     sources = _requested_sources(source or id_source)
     await _ensure_cinetixx_cached(cinetixx_cache, cinetixx_service, sources, mandator_id)
+    await _ensure_yorck_cached(yorck_cache, yorck_service, sources)
 
     if "kinoheld" in sources:
         with contextlib.suppress(Exception):
@@ -232,6 +284,9 @@ async def get_unified_movie(
     if "cinetixx" in sources:
         with contextlib.suppress(Exception):
             return cinetixx_movie_to_unified(await cinetixx_cache.get_movie(source_id, mandator_id))
+    if "yorck" in sources:
+        with contextlib.suppress(Exception):
+            return yorck_movie_to_unified(await yorck_cache.get_movie(source_id))
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unified movie not found")
 
 
@@ -241,12 +296,15 @@ async def list_unified_shows(
     kinoheld_cache: KinoheldCacheDep,
     cinetixx_cache: CinetixxCacheDep,
     cinetixx_service: CinetixxServiceDep,
+    yorck_cache: YorckCacheDep,
+    yorck_service: YorckServiceDep,
     source: Annotated[str | None, Query(description="Optional source tag filter")] = None,
     mandator_id: Annotated[int | None, Query(alias="mandatorId", gt=0)] = None,
 ) -> list[UnifiedShow]:
     """List unified shows from cached providers."""
     sources = _requested_sources(source)
     await _ensure_cinetixx_cached(cinetixx_cache, cinetixx_service, sources, mandator_id)
+    await _ensure_yorck_cached(yorck_cache, yorck_service, sources)
 
     results: list[UnifiedShow] = []
     if "kinoheld" in sources:
@@ -265,6 +323,17 @@ async def list_unified_shows(
             ),
         )
         results.extend(cinetixx_show_to_unified(item) for item in cinetixx)
+    if "yorck" in sources:
+        yorck = await yorck_cache.search_shows(
+            YorckShowSearchParams(
+                date=params.date,
+                days=params.days,
+                movie_id=params.movie_id,
+                cinema_id=params.cinema_id,
+                limit=1000,
+            ),
+        )
+        results.extend(yorck_show_to_unified(item) for item in yorck)
 
     return _sort_shows(results)
 
@@ -274,6 +343,8 @@ async def get_unified_show(
     kinoheld_cache: KinoheldCacheDep,
     cinetixx_cache: CinetixxCacheDep,
     cinetixx_service: CinetixxServiceDep,
+    yorck_cache: YorckCacheDep,
+    yorck_service: YorckServiceDep,
     show_id: Annotated[str, Path(..., description="Unified or provider show ID")],
     source: Annotated[str | None, Query(description="Optional source tag filter")] = None,
     mandator_id: Annotated[int | None, Query(alias="mandatorId", gt=0)] = None,
@@ -282,6 +353,7 @@ async def get_unified_show(
     id_source, source_id = _split_unified_id(show_id)
     sources = _requested_sources(source or id_source)
     await _ensure_cinetixx_cached(cinetixx_cache, cinetixx_service, sources, mandator_id)
+    await _ensure_yorck_cached(yorck_cache, yorck_service, sources)
 
     if "kinoheld" in sources:
         with contextlib.suppress(Exception):
@@ -289,6 +361,9 @@ async def get_unified_show(
     if "cinetixx" in sources:
         with contextlib.suppress(Exception):
             return cinetixx_show_to_unified(await cinetixx_cache.get_show(source_id, mandator_id))
+    if "yorck" in sources:
+        with contextlib.suppress(Exception):
+            return yorck_show_to_unified(await yorck_cache.get_show(source_id))
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unified show not found")
 
 
@@ -298,12 +373,15 @@ async def list_unified_cities(
     kinoheld_cache: KinoheldCacheDep,
     cinetixx_cache: CinetixxCacheDep,
     cinetixx_service: CinetixxServiceDep,
+    yorck_cache: YorckCacheDep,
+    yorck_service: YorckServiceDep,
     source: Annotated[str | None, Query(description="Optional source tag filter")] = None,
     mandator_id: Annotated[int | None, Query(alias="mandatorId", gt=0)] = None,
 ) -> list[UnifiedCity]:
     """List unified cities from cached providers."""
     sources = _requested_sources(source)
     await _ensure_cinetixx_cached(cinetixx_cache, cinetixx_service, sources, mandator_id)
+    await _ensure_yorck_cached(yorck_cache, yorck_service, sources)
 
     results: list[UnifiedCity] = []
     if "kinoheld" in sources:
@@ -319,6 +397,11 @@ async def list_unified_cities(
             ),
         )
         results.extend(cinetixx_city_to_unified(item) for item in cinetixx)
+    if "yorck" in sources:
+        yorck = await yorck_cache.search_cities(
+            YorckCitySearchParams(search=params.search or params.location, limit=params.limit),
+        )
+        results.extend(yorck_city_to_unified(item) for item in yorck)
 
     return _sort_by_name(results)[: params.limit]
 
@@ -328,6 +411,8 @@ async def get_unified_city(
     kinoheld_cache: KinoheldCacheDep,
     cinetixx_cache: CinetixxCacheDep,
     cinetixx_service: CinetixxServiceDep,
+    yorck_cache: YorckCacheDep,
+    yorck_service: YorckServiceDep,
     city_id: Annotated[str, Path(..., description="Unified or provider city ID")],
     source: Annotated[str | None, Query(description="Optional source tag filter")] = None,
     mandator_id: Annotated[int | None, Query(alias="mandatorId", gt=0)] = None,
@@ -336,6 +421,7 @@ async def get_unified_city(
     id_source, source_id = _split_unified_id(city_id)
     sources = _requested_sources(source or id_source)
     await _ensure_cinetixx_cached(cinetixx_cache, cinetixx_service, sources, mandator_id)
+    await _ensure_yorck_cached(yorck_cache, yorck_service, sources)
 
     if "kinoheld" in sources:
         with contextlib.suppress(Exception):
@@ -343,6 +429,9 @@ async def get_unified_city(
     if "cinetixx" in sources:
         with contextlib.suppress(Exception):
             return cinetixx_city_to_unified(await cinetixx_cache.get_city(source_id, mandator_id))
+    if "yorck" in sources:
+        with contextlib.suppress(Exception):
+            return yorck_city_to_unified(await yorck_cache.get_city(source_id))
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Unified city not found")
 
 
@@ -351,12 +440,15 @@ async def list_unified_genres(
     kinoheld_cache: KinoheldCacheDep,
     cinetixx_cache: CinetixxCacheDep,
     cinetixx_service: CinetixxServiceDep,
+    yorck_cache: YorckCacheDep,
+    yorck_service: YorckServiceDep,
     source: Annotated[str | None, Query(description="Optional source tag filter")] = None,
     mandator_id: Annotated[int | None, Query(alias="mandatorId", gt=0)] = None,
 ) -> list[UnifiedGenre]:
     """List unified genres/categories from cached providers."""
     sources = _requested_sources(source)
     await _ensure_cinetixx_cached(cinetixx_cache, cinetixx_service, sources, mandator_id)
+    await _ensure_yorck_cached(yorck_cache, yorck_service, sources)
 
     results: list[UnifiedGenre] = []
     if "kinoheld" in sources:
@@ -368,5 +460,8 @@ async def list_unified_genres(
             CinetixxGenreSearchParams(mandator_id=mandator_id)
         )
         results.extend(cinetixx_genre_to_unified(item) for item in cinetixx)
+    if "yorck" in sources:
+        yorck = await yorck_cache.list_genres(YorckGenreSearchParams())
+        results.extend(yorck_genre_to_unified(item) for item in yorck)
 
     return _sort_by_name(results)
