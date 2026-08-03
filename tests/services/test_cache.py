@@ -631,3 +631,20 @@ class TestFetchSharesMovies:
         cached = [s for day in cache._shows.values() for s in day]
         assert len(cached) > 1
         assert len({id(s.movie) for s in cached}) == 1
+
+
+class TestInternRegistry:
+    def test_shared_registry_collapses_across_separate_calls(self) -> None:
+        """Each response must collapse onto movies already seen, not just within itself."""
+        canonical: dict = {}
+        first = [_show_with_movie("s1", "m1")]
+        second = [_show_with_movie("s2", "m1")]
+
+        assert _intern_movies([first], canonical) == 0
+        assert _intern_movies([second], canonical) == 1
+        assert second[0].movie is first[0].movie
+
+    def test_registry_is_optional(self) -> None:
+        groups = [[_show_with_movie("s1", "m1"), _show_with_movie("s2", "m1")]]
+
+        assert _intern_movies(groups) == 1

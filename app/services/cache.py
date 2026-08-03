@@ -64,7 +64,10 @@ def _enrich_show_genres(shows: Iterable[Show], genres_by_title: dict[str, list[G
         movie.genres = list(genres)
 
 
-def _intern_movies(show_groups: Iterable[list[Show]]) -> int:
+def _intern_movies(
+    show_groups: Iterable[list[Show]],
+    canonical: dict[str, Movie] | None = None,
+) -> int:
     """Collapse duplicate embedded movies onto one instance per movie ID.
 
     Kinoheld embeds a full movie record — description, cast, directors, genres — in
@@ -76,9 +79,13 @@ def _intern_movies(show_groups: Iterable[list[Show]]) -> int:
     backfill, which is a property of the film rather than of one screening; doing it
     once now serves every show of that film.
 
+    Pass a shared ``canonical`` registry to collapse each response as it arrives, so
+    the duplicates never pile up in the first place; collapsing only at the end still
+    leaves every copy alive at once, and that peak is what the process keeps.
+
     Returns the number of duplicate instances dropped.
     """
-    canonical: dict[str, Movie] = {}
+    canonical = {} if canonical is None else canonical
     collapsed = 0
     for shows in show_groups:
         for show in shows:
@@ -287,24 +294,28 @@ class KinoheldCache:
         """
         semaphore = asyncio.Semaphore(settings.kinoheld_sync_concurrency)
         dates = list(dates)
+        # Shared across the batch so each response's embedded movies collapse onto the
+        # copies already seen. Deferring this to the end would hold every duplicate at
+        # once, and that peak is what the process never gives back.
+        canonical: dict[str, Movie] = {}
 
         async def fetch(cinema_id: str, date: str) -> tuple[str, list[Show] | None]:
             params = ShowSearchParams(cinema_id=cinema_id, date=dt.date.fromisoformat(date))
             async with semaphore:
                 try:
-                    return f"{cinema_id}::{date}", await service.search_shows(params)
+                    shows = await service.search_shows(params)
                 except Exception:
                     logger.exception("Failed to fetch shows for cinema %s on %s", cinema_id, date)
                     # Leave the entry absent rather than caching an empty day, so the
                     # date is retried instead of reading as "no shows" until refresh.
                     return f"{cinema_id}::{date}", None
+            _intern_movies([shows], canonical)
+            return f"{cinema_id}::{date}", shows
 
         results = await asyncio.gather(
             *(fetch(cinema_id, date) for cinema_id in cinema_ids for date in dates),
         )
-        fetched = {key: shows for key, shows in results if shows is not None}
-        _intern_movies(fetched.values())
-        return fetched
+        return {key: shows for key, shows in results if shows is not None}
 
     async def refresh(self, service: KinoheldService) -> None:
         """Fetch data from Kinoheld and rebuild the cache atomically."""

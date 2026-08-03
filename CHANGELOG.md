@@ -6,7 +6,7 @@
 
 #### Changed
 
-- The show cache no longer keeps a separate copy of the same film for every screening. Kinoheld embeds a full movie record — description, cast, directors, genres — in each show, so a film screened 26 times arrived as 26 identical `Movie` objects; they are now collapsed onto one instance per movie ID as shows are fetched. Measured against live data this drops the show cache by **56%** (9.6 KB to 4.2 KB per show), with no change to the read path or to any response.
+- The show cache no longer keeps a separate copy of the same film for every screening. Kinoheld embeds a full movie record — description, cast, directors, genres — in each show, so a film screened 26 times arrived as 26 identical `Movie` objects; they are now collapsed onto one instance per movie ID as shows are fetched. Measured against live data this drops the show cache by **56%** (9.6 KB to 4.2 KB per show), with no change to the read path or to any response. Responses are collapsed as they arrive rather than at the end of the batch, so peak allocation falls by the same amount (32.8 MB to 14.8 MB per 3 500 shows) instead of the process keeping a high-water mark it never returns.
 
 ### Natural-language search
 
