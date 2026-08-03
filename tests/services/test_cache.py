@@ -12,7 +12,7 @@ from app.schemas.city import City, CitySearchParams
 from app.schemas.common import Geo
 from app.schemas.movie import Genre, Movie, MovieSearchParams
 from app.schemas.show import Show, ShowSearchParams
-from app.services.cache import KinoheldCache
+from app.services.cache import KinoheldCache, _intern_movies
 from app.services.kinoheld import KinoheldService
 
 
@@ -545,3 +545,89 @@ class TestGenreEnrichment:
 
         cached = cache._shows["c1::2026-07-26"][0]
         assert [g.name for g in cached.movie.genres] == ["Horrorfilm"]
+
+
+def _show_with_movie(show_id: str, movie_id: str, title: str = "Dune") -> Show:
+    """A show carrying its own embedded copy of a movie, as Kinoheld returns them."""
+    return Show(id=show_id, name=title, movie=Movie(id=movie_id, title=title))
+
+
+class TestInternMovies:
+    def test_duplicate_movies_collapse_to_one_shared_instance(self) -> None:
+        groups = [
+            [_show_with_movie("s1", "m1"), _show_with_movie("s2", "m1")],
+            [_show_with_movie("s3", "m1"), _show_with_movie("s4", "m2", "Arrival")],
+        ]
+
+        collapsed = _intern_movies(groups)
+
+        shows = [s for g in groups for s in g]
+        assert collapsed == 2
+        # Every show of the same film now points at one object, not just an equal one.
+        assert shows[0].movie is shows[1].movie is shows[2].movie
+        assert shows[3].movie is not shows[0].movie
+        assert len({id(s.movie) for s in shows}) == 2
+
+    def test_values_are_preserved(self) -> None:
+        groups = [[_show_with_movie("s1", "m1"), _show_with_movie("s2", "m1")]]
+
+        _intern_movies(groups)
+
+        for show in groups[0]:
+            assert show.movie is not None
+            assert show.movie.id == "m1"
+            assert show.movie.title == "Dune"
+
+    def test_genre_backfill_reaches_every_show_of_the_film(self) -> None:
+        groups = [[_show_with_movie("s1", "m1"), _show_with_movie("s2", "m1")]]
+        _intern_movies(groups)
+
+        # Enrichment mutates the movie; sharing must not lose it for the other show.
+        groups[0][0].movie.genres = [Genre(id="g1", name="Sci-Fi", urlSlug="sci-fi")]
+
+        assert [g.name for g in groups[0][1].movie.genres] == ["Sci-Fi"]
+
+    def test_shows_without_a_movie_or_id_are_left_alone(self) -> None:
+        no_movie = Show(id="s1", name="TBA")
+        no_id = Show(id="s2", name="Mystery", movie=Movie(id="", title="Unknown"))
+        groups = [[no_movie, no_id]]
+
+        assert _intern_movies(groups) == 0
+        assert no_movie.movie is None
+        assert no_id.movie is not None
+
+    def test_nothing_to_collapse_is_a_no_op(self) -> None:
+        groups = [[_show_with_movie("s1", "m1"), _show_with_movie("s2", "m2", "Arrival")]]
+
+        assert _intern_movies(groups) == 0
+
+
+@pytest.mark.asyncio
+class TestFetchSharesMovies:
+    async def test_prefetched_shows_share_movie_instances_across_cinemas(
+        self,
+        cache: KinoheldCache,
+        mock_service: AsyncMock,
+    ) -> None:
+        mock_service.search_cinemas.return_value = [
+            Cinema(id="1", name="Kino A"),
+            Cinema(id="2", name="Kino B"),
+        ]
+        mock_service.search_movies.return_value = []
+        mock_service.search_cities.return_value = []
+        mock_service.list_genres.return_value = []
+        # Every call returns a fresh copy, exactly like separate HTTP responses do.
+        mock_service.search_shows.side_effect = lambda params: [
+            _show_with_movie(f"{params.cinema_id}-{params.date}", "m1"),
+        ]
+
+        monkey = settings.kinoheld_sync_cinema_count
+        settings.kinoheld_sync_cinema_count = 2
+        try:
+            await cache.refresh(mock_service)
+        finally:
+            settings.kinoheld_sync_cinema_count = monkey
+
+        cached = [s for day in cache._shows.values() for s in day]
+        assert len(cached) > 1
+        assert len({id(s.movie) for s in cached}) == 1

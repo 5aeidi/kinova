@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Kinoheld cache
+
+#### Changed
+
+- The show cache no longer keeps a separate copy of the same film for every screening. Kinoheld embeds a full movie record — description, cast, directors, genres — in each show, so a film screened 26 times arrived as 26 identical `Movie` objects; they are now collapsed onto one instance per movie ID as shows are fetched. Measured against live data this drops the show cache by **56%** (9.6 KB to 4.2 KB per show), with no change to the read path or to any response.
+
 ### Natural-language search
 
 #### Fixed

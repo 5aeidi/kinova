@@ -64,6 +64,34 @@ def _enrich_show_genres(shows: Iterable[Show], genres_by_title: dict[str, list[G
         movie.genres = list(genres)
 
 
+def _intern_movies(show_groups: Iterable[list[Show]]) -> int:
+    """Collapse duplicate embedded movies onto one instance per movie ID.
+
+    Kinoheld embeds a full movie record — description, cast, directors, genres — in
+    every single show, so a film screened 26 times arrives as 26 identical ``Movie``
+    objects. Those embedded records dominate the show cache, and sharing one instance
+    per ID reclaims most of it without touching the read path.
+
+    Sharing is safe because the only mutation applied to an embedded movie is genre
+    backfill, which is a property of the film rather than of one screening; doing it
+    once now serves every show of that film.
+
+    Returns the number of duplicate instances dropped.
+    """
+    canonical: dict[str, Movie] = {}
+    collapsed = 0
+    for shows in show_groups:
+        for show in shows:
+            movie = show.movie
+            if movie is None or not movie.id:
+                continue
+            existing = canonical.setdefault(movie.id, movie)
+            if existing is not movie:
+                show.movie = existing
+                collapsed += 1
+    return collapsed
+
+
 def _titles_missing_genres(shows: Iterable[Show]) -> set[str]:
     """Return normalized titles of shows still left without any genre."""
     return {
@@ -274,7 +302,9 @@ class KinoheldCache:
         results = await asyncio.gather(
             *(fetch(cinema_id, date) for cinema_id in cinema_ids for date in dates),
         )
-        return {key: shows for key, shows in results if shows is not None}
+        fetched = {key: shows for key, shows in results if shows is not None}
+        _intern_movies(fetched.values())
+        return fetched
 
     async def refresh(self, service: KinoheldService) -> None:
         """Fetch data from Kinoheld and rebuild the cache atomically."""
