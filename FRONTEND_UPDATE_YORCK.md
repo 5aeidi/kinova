@@ -143,13 +143,13 @@ Notable fields:
   "flags": ["OmU"],
   "accessibility": "Fully accessible",
   "runtime": 98,
-  "bookingUrl": "https://www.yorck.de/en/films/dreams"
+  "bookingUrl": "https://www.yorck.de/en/checkout/seats?sessionid=1002-15565"
 }
 ```
 
 - **`formats`** uses the same vocabulary you already handle: `OV`, `OmU`, `OmeU`, `DF`. It's duplicated into `flags` for consistency with other sources.
 - **`beginsAt`** is ISO 8601 with an offset, exactly as yorck.de publishes it. Parse it as a full datetime and display in local time — do not assume the offset is always `+02:00`/CEST (upstream currently emits `+01:00`).
-- **`bookingUrl`** points to the film's yorck.de page (which hosts the ticket flow); there is no direct deep link per session.
+- **`bookingUrl`** deep-links into the yorck.de checkout for **that specific session** — send users straight there instead of to the film page. It lands on `/checkout/seats?sessionid=…` for screens with allocated seating (the large majority) and `/checkout/tickets?sessionid=…` for the rest, mirroring what Yorck's own showtime buttons do. Only if the session has no usable ID does it fall back to the film's detail page.
 
 ---
 

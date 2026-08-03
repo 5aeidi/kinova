@@ -5,6 +5,7 @@ import datetime as dt
 import logging
 import re
 from typing import Any
+from urllib.parse import quote
 
 from app.core.config import settings
 from app.core.exceptions import YorckNotFoundError
@@ -154,9 +155,10 @@ class YorckService:
 
     async def get_dataset(self) -> YorckDataset:
         """Fetch and normalize the full Yorck programme."""
-        cinemas_page, films_page = await asyncio.gather(
+        cinemas_page, films_page, seating = await asyncio.gather(
             self.client.get_page_data("cinemas"),
             self.client.get_page_data("films"),
+            self._fetch_session_seating(),
         )
 
         cinemas = self._normalize_cinemas(cinemas_page.get("cinemas"))
@@ -180,7 +182,13 @@ class YorckService:
                 return
             movies.setdefault(movie.id, movie)
             for session in _fields(entry).get("sessions") or []:
-                show = self._session_to_show(session, movie, vista_to_cinema, name_to_cinema)
+                show = self._session_to_show(
+                    session,
+                    movie,
+                    vista_to_cinema,
+                    name_to_cinema,
+                    seating,
+                )
                 if show is not None:
                     shows.setdefault(show.id, show)
 
@@ -355,6 +363,31 @@ class YorckService:
             return None
         return f"{self.client.base_url}/{self.client.locale}/{kind}/{slug}"
 
+    def _booking_url(self, session_id: str | None, allocated_seating: bool) -> str | None:
+        """Build the deep link into the Yorck checkout for a single session.
+
+        Yorck's own showtime buttons route to seat selection when the screen has
+        allocated seating and straight to ticket selection otherwise, passing the
+        session ID as a query parameter that the checkout resolves on load.
+        """
+        if not session_id:
+            return None
+        step = "seats" if allocated_seating else "tickets"
+        return (
+            f"{self.client.base_url}/{self.client.locale}/checkout/{step}"
+            f"?sessionid={quote(session_id, safe='')}"
+        )
+
+    async def _fetch_session_seating(self) -> dict[str, bool]:
+        """Look up per-session seating flags; failures degrade to an empty map."""
+        if not settings.yorck_fetch_session_seating:
+            return {}
+        try:
+            return await self.client.get_session_seating()
+        except Exception:
+            logger.warning("Failed to fetch Yorck session seating flags", exc_info=True)
+            return {}
+
     def _normalize_cinemas(self, entries: Any) -> list[YorckCinema]:
         cinemas: list[YorckCinema] = []
         for entry in entries or []:
@@ -475,6 +508,7 @@ class YorckService:
         movie: YorckMovie,
         vista_to_cinema: dict[str, YorckCinema],
         name_to_cinema: dict[str, YorckCinema],
+        seating: dict[str, bool],
     ) -> YorckShow | None:
         fields = _fields(session)
         session_id = _entry_id(session)
@@ -506,7 +540,11 @@ class YorckService:
             accessibility=_as_str(session_cinema.get("accessibility"))
             or (cinema.accessibility if cinema else None),
             runtime=movie.runtime,
-            bookingUrl=movie.detail_url,
+            # Sessions whose seating flag is missing default to seat selection: almost
+            # every Yorck screen allocates seats, and sending an allocated-seating
+            # session to ticket selection would skip the seat picker entirely.
+            bookingUrl=self._booking_url(session_id, seating.get(session_id or "", True))
+            or movie.detail_url,
         )
 
     @staticmethod

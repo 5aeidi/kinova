@@ -155,6 +155,32 @@ class Settings(BaseSettings):
         le=30,
         description="Default number of Yorck show days to return when filtering dates",
     )
+    yorck_fetch_session_seating: bool = Field(
+        default=True,
+        description=(
+            "Look up each session's allocatedSeating flag in Contentful so booking "
+            "links point at the seat-selection step where the cinema requires it"
+        ),
+    )
+    yorck_contentful_base_url: str = Field(
+        default="https://cdn.contentful.com",
+        description="Contentful Delivery API base URL backing the Yorck website",
+    )
+    yorck_contentful_space_id: str = Field(
+        default="4mws6uyas4ta",
+        description="Contentful space ID used by the Yorck website",
+    )
+    yorck_contentful_environment: str = Field(
+        default="master",
+        description="Contentful environment used by the Yorck website",
+    )
+    yorck_contentful_access_token: str = Field(
+        default="UNY_7-kVS3UkYxAMEIpyO2g7Lh-8e7645oGt2ksDhE8",
+        description=(
+            "Contentful read-only delivery token published in the Yorck web bundle; "
+            "override if Yorck rotates it"
+        ),
+    )
 
     # Local cache / sync settings
     kinoheld_sync_interval_seconds: int = Field(

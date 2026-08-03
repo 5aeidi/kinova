@@ -1028,6 +1028,8 @@ Yorck Kinogruppe (Berlin) data is read from yorck.de's public Next.js data endpo
 
 List routes accept `search` and `limit`; `/yorck/shows` also accepts `date`, `days`, `movieId`, and `cinemaId` like the Cinetixx show routes. Movies carry `isSpecial` (curated series/events) and `isPresale` (coming-soon films without sessions yet) flags.
 
+Each show's `bookingUrl` deep-links into the yorck.de checkout for that session rather than to the film page: `/checkout/seats?sessionid={id}` when the screen has allocated seating and `/checkout/tickets?sessionid={id}` otherwise, matching how Yorck's own showtime buttons route. The `allocatedSeating` flag is not in the Next.js programme data, so it is read once per refresh from the same public Contentful space the website queries client-side; set `YORCK_FETCH_SESSION_SEATING=false` to skip that lookup, in which case every session links to the seat-selection step.
+
 ### Internal Yorck Cache Routes
 
 Cache-backed Yorck routes live under `/internal/yorck/*` and mirror the normalized public routes, plus `/internal/yorck/health` for cache status:

@@ -132,3 +132,6 @@ class TestInternalYorck:
         data = response.json()
         assert [item["id"] for item in data] == ["1002-15565"]
         assert data[0]["movie"]["title"] == "Dreams"
+        assert data[0]["detailUrl"]["url"] == (
+            "https://www.yorck.de/en/checkout/seats?sessionid=1002-15565"
+        )

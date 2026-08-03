@@ -14,6 +14,7 @@
 
 #### Changed
 
+- Yorck show `bookingUrl` (and the unified show `detailUrl`) now deep-links into the yorck.de checkout for that specific session — `/checkout/seats?sessionid=…` for screens with allocated seating, `/checkout/tickets?sessionid=…` otherwise — instead of pointing at the film's page. The `allocatedSeating` flag is missing from the Next.js programme data, so it is read once per refresh from the public Contentful space the website itself queries; `YORCK_FETCH_SESSION_SEATING=false` skips that lookup and links every session to seat selection.
 - Yorck cache population runs in the background at startup and refreshes hourly by default (`YORCK_SYNC_INTERVAL_SECONDS`), mirroring Cinetixx. The Next.js `buildId` is resolved automatically and re-resolved when Yorck deploys a new build.
 
 ### Frontend API: Cinetixx and Unified Data

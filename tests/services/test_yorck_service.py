@@ -110,10 +110,11 @@ FILM_DETAIL_PAGE = {
 }
 
 
-def make_service() -> YorckService:
+def make_service(seating: dict[str, bool] | None = None) -> YorckService:
     client = AsyncMock()
     client.base_url = "https://www.yorck.de"
     client.locale = "en"
+    client.get_session_seating.return_value = seating if seating is not None else {}
 
     async def get_page_data(path: str) -> dict:
         if path == "cinemas":
@@ -174,6 +175,30 @@ class TestYorckService:
         assert show.movie_id == "HO00005912"
         assert show.flags == ["OmU"]
         assert show.date == dt.date(2026, 7, 26)
+
+    async def test_booking_url_points_at_seat_selection_by_default(self):
+        dataset = await make_service().get_dataset()
+
+        assert dataset.shows[0].booking_url == (
+            "https://www.yorck.de/en/checkout/seats?sessionid=1002-15565"
+        )
+
+    async def test_booking_url_skips_seats_for_unallocated_sessions(self):
+        dataset = await make_service({"1002-15565": False}).get_dataset()
+
+        assert dataset.shows[0].booking_url == (
+            "https://www.yorck.de/en/checkout/tickets?sessionid=1002-15565"
+        )
+
+    async def test_booking_url_falls_back_when_seating_lookup_fails(self):
+        service = make_service()
+        service.client.get_session_seating.side_effect = RuntimeError("contentful down")
+
+        dataset = await service.get_dataset()
+
+        assert dataset.shows[0].booking_url == (
+            "https://www.yorck.de/en/checkout/seats?sessionid=1002-15565"
+        )
 
     async def test_filter_shows_by_date_and_cinema(self):
         dataset = await make_service().get_dataset()

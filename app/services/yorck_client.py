@@ -13,6 +13,7 @@ from app.core.exceptions import YorckAPIError
 logger = logging.getLogger(__name__)
 
 _BUILD_ID_RE = re.compile(r'"buildId"\s*:\s*"([^"]+)"')
+_CONTENTFUL_PAGE_SIZE = 1000
 
 
 class YorckClient:
@@ -97,6 +98,59 @@ class YorckClient:
         if not isinstance(page_props, dict):
             raise YorckAPIError("Yorck returned an unexpected JSON shape")
         return page_props
+
+    async def get_session_seating(self) -> dict[str, bool]:
+        """Return ``{session id: allocatedSeating}`` for every upcoming session.
+
+        The Next.js programme data omits ``allocatedSeating``, but the booking flow
+        needs it to decide whether a session starts at seat selection or straight at
+        ticket selection. It is read from the same Contentful space the website
+        itself queries client-side, projecting only the one field.
+        """
+        url = (
+            f"{settings.yorck_contentful_base_url.rstrip('/')}"
+            f"/spaces/{settings.yorck_contentful_space_id}"
+            f"/environments/{settings.yorck_contentful_environment}/entries"
+        )
+        params: dict[str, Any] = {
+            "access_token": settings.yorck_contentful_access_token,
+            "content_type": "session",
+            "select": "sys.id,fields.allocatedSeating",
+            "include": 0,
+            "limit": _CONTENTFUL_PAGE_SIZE,
+        }
+
+        seating: dict[str, bool] = {}
+        skip = 0
+        while True:
+            logger.debug("yorck.request endpoint=session-seating skip=%d", skip)
+            try:
+                response = await self._client.get(url, params={**params, "skip": skip})
+                response.raise_for_status()
+                payload = response.json()
+            except (httpx.HTTPError, ValueError) as exc:
+                raise YorckAPIError(f"Failed to load Yorck session seating: {exc}") from exc
+
+            items = payload.get("items") if isinstance(payload, dict) else None
+            if not isinstance(items, list) or not items:
+                break
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                sys_block = item.get("sys")
+                fields = item.get("fields")
+                if not isinstance(sys_block, dict) or not isinstance(fields, dict):
+                    continue
+                session_id = sys_block.get("id")
+                allocated = fields.get("allocatedSeating")
+                if session_id is not None and isinstance(allocated, bool):
+                    seating[str(session_id)] = allocated
+
+            skip += len(items)
+            total = payload.get("total")
+            if not isinstance(total, int) or skip >= total:
+                break
+        return seating
 
     async def _request_page(self, build_id: str, path: str) -> httpx.Response:
         url = f"{self.base_url}/_next/data/{build_id}/{self.locale}/{path.strip('/')}.json"
