@@ -13,6 +13,12 @@ from app.core.exceptions import YorckAPIError
 logger = logging.getLogger(__name__)
 
 _BUILD_ID_RE = re.compile(r'"buildId"\s*:\s*"([^"]+)"')
+_APP_CHUNK_RE = re.compile(r'src="([^"]*/_next/static/chunks/pages/_app-[^"]+\.js)"')
+# The website builds its Contentful client with the space and delivery token as
+# adjacent literals; matching them as a pair avoids picking up an unrelated token.
+_CONTENTFUL_CREDS_RE = re.compile(
+    r'space:\s*"([A-Za-z0-9]+)"\s*,\s*accessToken:\s*"([A-Za-z0-9_.\-]{20,})"',
+)
 _CONTENTFUL_PAGE_SIZE = 1000
 
 
@@ -23,6 +29,10 @@ class YorckClient:
     ``/_next/data/<buildId>/<locale>/<path>.json``. The build ID changes on every
     site deploy, so it is scraped from an HTML page, memoized, and re-resolved
     once when a data request comes back 404 with the cached ID.
+
+    Contentful credentials are handled the same way: the configured space and
+    token are tried first, and a 401/403 triggers one re-scrape from the site's
+    JS bundle before the request is retried.
     """
 
     def __init__(
@@ -38,6 +48,8 @@ class YorckClient:
         self._client = httpx.AsyncClient(timeout=timeout, limits=limits, follow_redirects=True)
         self._build_id: str | None = None
         self._build_id_lock = asyncio.Lock()
+        self._contentful_creds: tuple[str, str] | None = None
+        self._contentful_creds_lock = asyncio.Lock()
 
     async def __aenter__(self) -> "YorckClient":
         return self
@@ -106,29 +118,25 @@ class YorckClient:
         needs it to decide whether a session starts at seat selection or straight at
         ticket selection. It is read from the same Contentful space the website
         itself queries client-side, projecting only the one field.
+
+        A rejected token is re-scraped from the site once and the request retried,
+        so a rotation on Yorck's side heals on the next refresh without a redeploy.
         """
-        url = (
-            f"{settings.yorck_contentful_base_url.rstrip('/')}"
-            f"/spaces/{settings.yorck_contentful_space_id}"
-            f"/environments/{settings.yorck_contentful_environment}/entries"
-        )
-        params: dict[str, Any] = {
-            "access_token": settings.yorck_contentful_access_token,
-            "content_type": "session",
-            "select": "sys.id,fields.allocatedSeating",
-            "include": 0,
-            "limit": _CONTENTFUL_PAGE_SIZE,
-        }
+        space, token = await self.get_contentful_credentials()
 
         seating: dict[str, bool] = {}
         skip = 0
         while True:
             logger.debug("yorck.request endpoint=session-seating skip=%d", skip)
+            response = await self._request_seating(space, token, skip)
+            if response.status_code in (401, 403) and (space, token) == self._current_credentials():
+                space, token = await self.get_contentful_credentials(force_refresh=True)
+                response = await self._request_seating(space, token, skip)
+
             try:
-                response = await self._client.get(url, params={**params, "skip": skip})
                 response.raise_for_status()
                 payload = response.json()
-            except (httpx.HTTPError, ValueError) as exc:
+            except (httpx.HTTPStatusError, ValueError) as exc:
                 raise YorckAPIError(f"Failed to load Yorck session seating: {exc}") from exc
 
             items = payload.get("items") if isinstance(payload, dict) else None
@@ -151,6 +159,79 @@ class YorckClient:
             if not isinstance(total, int) or skip >= total:
                 break
         return seating
+
+    def _current_credentials(self) -> tuple[str, str]:
+        """Return the Contentful credentials in force, scraped ones winning."""
+        if self._contentful_creds is not None:
+            return self._contentful_creds
+        return (
+            settings.yorck_contentful_space_id,
+            settings.yorck_contentful_access_token,
+        )
+
+    async def get_contentful_credentials(
+        self,
+        force_refresh: bool = False,
+    ) -> tuple[str, str]:
+        """Return the ``(space, delivery token)`` pair used for Contentful reads.
+
+        Configured values are used until they stop working; ``force_refresh`` then
+        re-reads the pair from the website's JS bundle, where it ships in clear as
+        part of every page load.
+        """
+        async with self._contentful_creds_lock:
+            if not force_refresh:
+                return self._current_credentials()
+
+            creds = await self._scrape_contentful_credentials()
+            self._contentful_creds = creds
+            logger.info("Re-resolved Yorck Contentful credentials for space %s", creds[0])
+            return creds
+
+    async def _scrape_contentful_credentials(self) -> tuple[str, str]:
+        """Pull the Contentful space and delivery token out of the site bundle."""
+        page_url = f"{self.base_url}/{self.locale}/cinemas"
+        logger.debug("yorck.request endpoint=contentful-creds url=%s", page_url)
+        try:
+            page = await self._client.get(page_url)
+            page.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise YorckAPIError(f"Failed to load Yorck page for Contentful creds: {exc}") from exc
+
+        chunk_match = _APP_CHUNK_RE.search(page.text)
+        if chunk_match is None:
+            raise YorckAPIError("Could not find the Yorck app bundle to read Contentful creds")
+
+        chunk_url = f"{self.base_url}{chunk_match.group(1)}"
+        try:
+            chunk = await self._client.get(chunk_url)
+            chunk.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise YorckAPIError(f"Failed to load Yorck app bundle: {exc}") from exc
+
+        creds_match = _CONTENTFUL_CREDS_RE.search(chunk.text)
+        if creds_match is None:
+            raise YorckAPIError("Could not find Contentful credentials in the Yorck app bundle")
+        return creds_match.group(1), creds_match.group(2)
+
+    async def _request_seating(self, space: str, token: str, skip: int) -> httpx.Response:
+        url = (
+            f"{settings.yorck_contentful_base_url.rstrip('/')}"
+            f"/spaces/{space}"
+            f"/environments/{settings.yorck_contentful_environment}/entries"
+        )
+        params: dict[str, Any] = {
+            "access_token": token,
+            "content_type": "session",
+            "select": "sys.id,fields.allocatedSeating",
+            "include": 0,
+            "limit": _CONTENTFUL_PAGE_SIZE,
+            "skip": skip,
+        }
+        try:
+            return await self._client.get(url, params=params)
+        except httpx.HTTPError as exc:
+            raise YorckAPIError(f"Failed to load Yorck session seating: {exc}") from exc
 
     async def _request_page(self, build_id: str, path: str) -> httpx.Response:
         url = f"{self.base_url}/_next/data/{build_id}/{self.locale}/{path.strip('/')}.json"

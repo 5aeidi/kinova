@@ -1030,6 +1030,8 @@ List routes accept `search` and `limit`; `/yorck/shows` also accepts `date`, `da
 
 Each show's `bookingUrl` deep-links into the yorck.de checkout for that session rather than to the film page: `/checkout/seats?sessionid={id}` when the screen has allocated seating and `/checkout/tickets?sessionid={id}` otherwise, matching how Yorck's own showtime buttons route. The `allocatedSeating` flag is not in the Next.js programme data, so it is read once per refresh from the same public Contentful space the website queries client-side; set `YORCK_FETCH_SESSION_SEATING=false` to skip that lookup, in which case every session links to the seat-selection step.
 
+Those Contentful credentials are read-only and ship in clear in every yorck.de page load, so they are treated like the Next.js `buildId`: the configured pair is used until Contentful rejects it, then the space and token are re-scraped from the site's JS bundle and the request is retried. A rotation therefore heals on the next refresh with no redeploy. If the re-scrape also fails, the seating lookup is skipped for that refresh and every session falls back to the seat-selection link — booking still works, but the minority of unallocated-seating sessions take one extra click.
+
 ### Internal Yorck Cache Routes
 
 Cache-backed Yorck routes live under `/internal/yorck/*` and mirror the normalized public routes, plus `/internal/yorck/health` for cache status:
