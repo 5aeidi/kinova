@@ -571,6 +571,41 @@ class KinoheldCache:
         async with self._lock:
             return list(self._genres)
 
+    async def genre_vocabulary(self, limit: int) -> list[str]:
+        """Return the most-used genre tags, most common first.
+
+        The catalogue carries hundreds of near-duplicate labels
+        (``Komödie``/``Actionkomödie``/``Familienkomödie``), far too many to put in
+        front of an LLM. Ranking by how many cached movies actually carry each tag
+        keeps the list short enough to be cheap while still covering real queries.
+        """
+        if limit <= 0:
+            return []
+        async with self._lock:
+            movies = list(self._movies)
+            catalogue = [genre.name for genre in self._genres]
+
+        counts: dict[str, int] = {}
+        seen: dict[str, str] = {}
+        for movie in movies:
+            for genre in movie.genres:
+                name = (genre.name or "").strip()
+                if not name:
+                    continue
+                key = name.casefold()
+                seen.setdefault(key, name)
+                counts[key] = counts.get(key, 0) + 1
+
+        # Catalogue tags nobody is currently screening still belong in the vocabulary,
+        # just behind everything that has movies attached to it.
+        for name in catalogue:
+            cleaned = (name or "").strip()
+            if cleaned:
+                seen.setdefault(cleaned.casefold(), cleaned)
+
+        ranked = sorted(seen, key=lambda key: (-counts.get(key, 0), key))
+        return [seen[key] for key in ranked[:limit]]
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------

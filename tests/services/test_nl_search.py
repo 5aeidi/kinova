@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from app.schemas.cinema import Cinema, CitySummary
-from app.schemas.movie import Movie, Person
+from app.schemas.movie import Genre, Movie, Person
 from app.schemas.show import Show, ShowFlag
 from app.services.cache import KinoheldCache
 from app.services.llm_client import LLMClient, LLMError
@@ -428,3 +428,111 @@ async def test_structured_search_shows_with_location_uses_cache_filter(
     assert result.shows[0].id == sample_show.id
     # The Munich cinema should not trigger a live shows lookup.
     mock_live_service.search_shows.assert_not_awaited()
+
+
+def _movie(movie_id: str, *genres: str) -> Movie:
+    return Movie(
+        id=movie_id,
+        title=f"Film {movie_id}",
+        genres=[{"id": g, "name": g, "urlSlug": g.lower()} for g in genres],
+    )
+
+
+@pytest.mark.asyncio
+class TestGenreGrounding:
+    async def test_vocabulary_ranks_by_movie_usage_and_honours_limit(self) -> None:
+        cache = KinoheldCache()
+        cache._movies = [
+            _movie("1", "Komödie"),
+            _movie("2", "Komödie"),
+            _movie("3", "Komödie"),
+            _movie("4", "Drama"),
+            _movie("5", "Drama"),
+            _movie("6", "Horror"),
+        ]
+        cache._genres = [Genre(id="x", name="Nischenfilm", urlSlug="nischenfilm")]
+
+        assert await cache.genre_vocabulary(3) == ["Komödie", "Drama", "Horror"]
+        # Catalogue tags nothing is screening still appear, but only behind the rest.
+        assert (await cache.genre_vocabulary(10))[-1] == "Nischenfilm"
+        assert await cache.genre_vocabulary(0) == []
+
+    async def test_vocabulary_deduplicates_case_insensitively(self) -> None:
+        cache = KinoheldCache()
+        cache._movies = [_movie("1", "Drama"), _movie("2", "drama"), _movie("3", "DRAMA")]
+        cache._genres = []
+
+        assert await cache.genre_vocabulary(10) == ["Drama"]
+
+    async def test_prompt_is_grounded_in_real_tags(
+        self,
+        nl_service: NaturalLanguageSearchService,
+    ) -> None:
+        captured: dict[str, str] = {}
+
+        async def capture(system_message: str, user_message: str, **kwargs: object) -> dict:
+            captured["system"] = system_message
+            return {"intent": "movies", "genres": ["Komödie"]}
+
+        nl_service.llm_client.chat_completion = capture
+        parsed = await nl_service._parse_prompt(
+            NaturalLanguageQuery(prompt="something funny"),
+            ["Komödie", "Drama"],
+        )
+
+        assert parsed.genres == ["Komödie"]
+        assert "Available genres" in captured["system"]
+        assert "Komödie, Drama" in captured["system"]
+        assert "never invent a genre" in captured["system"]
+
+    async def test_prompt_without_vocabulary_keeps_generic_hint(
+        self,
+        nl_service: NaturalLanguageSearchService,
+    ) -> None:
+        captured: dict[str, str] = {}
+
+        async def capture(system_message: str, user_message: str, **kwargs: object) -> dict:
+            captured["system"] = system_message
+            return {"intent": "movies"}
+
+        nl_service.llm_client.chat_completion = capture
+        await nl_service._parse_prompt(NaturalLanguageQuery(prompt="anything"), [])
+
+        assert "Available genres" not in captured["system"]
+        assert "genre names like Horror" in captured["system"]
+
+    async def test_vocabulary_failure_does_not_break_search(self) -> None:
+        cache = KinoheldCache()
+        cache.genre_vocabulary = AsyncMock(side_effect=RuntimeError("boom"))
+
+        assert await NaturalLanguageSearchService._genre_vocabulary(cache) == []
+
+
+class TestGenreMatching:
+    def test_compound_tags_match_the_base_concept(self) -> None:
+        movies = [
+            _movie("1", "Actionkomödie"),
+            _movie("2", "Familienkomödie"),
+            _movie("3", "Drama"),
+        ]
+
+        matched = NaturalLanguageSearchService._filter_by_genres(movies, ["Komödie"])
+
+        assert [m.id for m in matched] == ["1", "2"]
+
+    def test_exact_and_case_insensitive_matches_still_work(self) -> None:
+        movies = [_movie("1", "Horror"), _movie("2", "Drama")]
+
+        matched = NaturalLanguageSearchService._filter_by_genres(movies, ["horror"])
+
+        assert [m.id for m in matched] == ["1"]
+
+    def test_unrelated_genre_matches_nothing(self) -> None:
+        movies = [_movie("1", "Horror"), _movie("2", "Drama")]
+
+        assert NaturalLanguageSearchService._filter_by_genres(movies, ["Western"]) == []
+
+    def test_empty_genre_list_is_a_no_op(self) -> None:
+        movies = [_movie("1", "Horror")]
+
+        assert NaturalLanguageSearchService._filter_by_genres(movies, []) == movies

@@ -264,7 +264,7 @@ class NaturalLanguageSearchService:
         cache: KinoheldCache,
     ) -> NaturalLanguageResult:
         """Run the full NL search pipeline."""
-        parsed = await self._parse_prompt(request)
+        parsed = await self._parse_prompt(request, await self._genre_vocabulary(cache))
         location_override = request.location or parsed.location
         if location_override:
             parsed.location = location_override
@@ -341,9 +341,37 @@ class NaturalLanguageSearchService:
     # ------------------------------------------------------------------
     # Parsing
     # ------------------------------------------------------------------
-    async def _parse_prompt(self, request: NaturalLanguageQuery) -> ParsedIntent:
+    @staticmethod
+    async def _genre_vocabulary(cache: KinoheldCache) -> list[str]:
+        """Fetch the real genre tags to ground the parser; never fatal if empty."""
+        try:
+            return await cache.genre_vocabulary(settings.nl_genre_vocabulary_limit)
+        except Exception:
+            logger.warning("Could not build genre vocabulary; parsing ungrounded")
+            return []
+
+    async def _parse_prompt(
+        self,
+        request: NaturalLanguageQuery,
+        genre_vocabulary: list[str] | None = None,
+    ) -> ParsedIntent:
         today = dt.date.today()
         tomorrow = today + dt.timedelta(days=1)
+        # Without the real tags the model invents English names ("Comedy") that never
+        # match a German catalogue ("Komödie"), so those searches return nothing.
+        if genre_vocabulary:
+            genre_field = '  "genres": ["copy exact names from Available genres"],\n'
+            genre_rules = (
+                "- Available genres (copy these spellings exactly; pick every one that "
+                "fits, or [] if none do; never invent a genre): "
+                + ", ".join(genre_vocabulary)
+                + "\n"
+                "- Match the user's wording to these even across languages, e.g. "
+                '"funny"/"comedy" -> the German comedy tags in the list.\n'
+            )
+        else:
+            genre_field = '  "genres": ["genre names like Horror, Drama, Comedy"],\n'
+            genre_rules = ""
         system_message = (
             "You are a structured-intent parser for a cinema search API. "
             "Extract every filter mentioned in the prompt and respond ONLY with a "
@@ -354,8 +382,8 @@ class NaturalLanguageSearchService:
             "{\n"
             '  "intent": "movies|shows|cinemas|unknown",\n'
             '  "searchQuery": "free-text title or cinema name, or null",\n'
-            '  "genres": ["genre names like Horror, Drama, Comedy"],\n'
-            '  "date": "YYYY-MM-DD, today, tomorrow, or null",\n'
+            + genre_field
+            + '  "date": "YYYY-MM-DD, today, tomorrow, or null",\n'
             '  "location": "city name or null",\n'
             '  "cinemaId": "Kinoheld cinema ID or null",\n'
             '  "flags": ["show flags: OmU, OV, 3D, IMAX, etc."],\n'
@@ -389,6 +417,7 @@ class NaturalLanguageSearchService:
             'if it asks for cinemas/theatres, intent is "cinemas"; '
             'otherwise default to "movies".\n'
             "- Return only the JSON object, no markdown or explanation.\n"
+            + genre_rules
         )
         try:
             data = await self.llm_client.chat_completion(
@@ -751,8 +780,26 @@ class NaturalLanguageSearchService:
 
     @staticmethod
     def _filter_by_genres(movies: list[Movie], genres: list[str]) -> list[Movie]:
-        genre_names = {g.casefold() for g in genres}
-        return [m for m in movies if any(g.name.casefold() in genre_names for g in m.genres)]
+        """Keep movies carrying any requested genre, tolerating compound tags.
+
+        Grounding the parser in the real vocabulary gets most of the way, but the
+        catalogue splits one concept across many labels, so a request for
+        ``Komödie`` should still match ``Actionkomödie`` and ``Familienkomödie``.
+        """
+        wanted = {name.casefold().strip() for name in genres if name and name.strip()}
+        if not wanted:
+            return movies
+
+        def matches(movie: Movie) -> bool:
+            for genre in movie.genres:
+                actual = (genre.name or "").casefold().strip()
+                if not actual:
+                    continue
+                if any(w == actual or w in actual or actual in w for w in wanted):
+                    return True
+            return False
+
+        return [movie for movie in movies if matches(movie)]
 
     @staticmethod
     def _filter_by_flags(shows: list[Show], flags: list[str]) -> list[Show]:

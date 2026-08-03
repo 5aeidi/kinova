@@ -274,6 +274,16 @@ class Settings(BaseSettings):
         default=True,
         description="Run a fallback text search when LLM parsing fails",
     )
+    nl_genre_vocabulary_limit: int = Field(
+        default=60,
+        ge=0,
+        le=500,
+        description=(
+            "How many real catalogue genre tags to show the LLM so it emits names "
+            "that actually exist. Ranked by how many cached movies carry them, so a "
+            "small list still covers most queries. 0 disables the grounding"
+        ),
+    )
 
     @field_validator("cinetixx_sync_mandator_ids", mode="before")
     @classmethod

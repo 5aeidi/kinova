@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Natural-language search
+
+#### Fixed
+
+- Genre searches returned nothing whenever the user's wording did not exactly equal a catalogue tag — "comedy"/"funny" never matched a German catalogue carrying `Komödie`, `Actionkomödie`, and `Familienkomödie`. The parser is now grounded in the real tags, and matching tolerates compound labels so `Komödie` also matches `Actionkomödie`.
+
+#### Added
+
+- `NL_GENRE_VOCABULARY_LIMIT` (default `60`): how many real genre tags are shown to the LLM, ranked by how many cached movies carry each one, so a short list still covers most queries while keeping prompt tokens down. `0` restores the previous ungrounded prompt.
+
 ### Frontend API: Yorck Kinogruppe
 
 #### Added
