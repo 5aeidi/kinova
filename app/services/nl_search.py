@@ -5,7 +5,7 @@ import datetime as dt
 import logging
 from dataclasses import dataclass
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.core.config import settings
 from app.core.exceptions import KinoheldNotFoundError
@@ -491,10 +491,37 @@ class NaturalLanguageSearchService:
                 user_message=request.prompt,
                 response_format={"type": "json_object"},
             )
-            return ParsedIntent.model_validate(data)
         except LLMError:
             logger.exception("LLM parsing failed; falling back to heuristic parser")
             return self._heuristic_parse(request.prompt)
+
+        try:
+            return ParsedIntent.model_validate(self._normalise_llm_fields(data))
+        except ValidationError:
+            # The model is asked for arrays but, for a prompt with nothing to put in
+            # one, sometimes emits null instead of []; normalising should already
+            # cover that. A validation error surviving normalisation means a shape
+            # the model returned that we did not anticipate — degrade to the
+            # heuristic parser rather than 500 the request over a JSON quirk.
+            logger.warning("LLM response failed validation even after normalising: %r", data)
+            return self._heuristic_parse(request.prompt)
+
+    _LIST_FIELDS = ("genres", "flags", "actors", "directors", "cast")
+
+    @classmethod
+    def _normalise_llm_fields(cls, data: object) -> object:
+        """Coerce a null list field to ``[]``.
+
+        The JSON schema in the prompt asks for arrays, but the model sometimes
+        emits ``null`` for "nothing here" instead — Groq's JSON mode does not
+        enforce the schema, only that the output is valid JSON.
+        """
+        if not isinstance(data, dict):
+            return data
+        return {
+            key: ([] if key in cls._LIST_FIELDS and value is None else value)
+            for key, value in data.items()
+        }
 
     @staticmethod
     def _heuristic_parse(prompt: str) -> ParsedIntent:

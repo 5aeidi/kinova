@@ -119,6 +119,46 @@ async def test_parse_prompt_falls_back_to_heuristic(
     assert parsed.date == (dt.date.today() + dt.timedelta(days=1)).isoformat()
 
 
+async def test_parse_prompt_tolerates_null_list_fields(
+    nl_service: NaturalLanguageSearchService,
+) -> None:
+    """Groq's JSON mode does not enforce the schema; null for "no items" happens."""
+    nl_service.llm_client.chat_completion = AsyncMock(
+        return_value={
+            "intent": "movies",
+            "searchQuery": "Tuner",
+            "genres": None,
+            "flags": None,
+            "actors": None,
+            "directors": None,
+            "cast": None,
+        }
+    )
+
+    parsed = await nl_service._parse_prompt(NaturalLanguageQuery(prompt="Tuner"))
+
+    assert parsed.intent == "movies"
+    assert parsed.search_query == "Tuner"
+    assert parsed.genres == []
+    assert parsed.flags == []
+    assert parsed.actors == []
+    assert parsed.directors == []
+    assert parsed.cast == []
+
+
+async def test_parse_prompt_falls_back_when_validation_fails_after_normalising(
+    nl_service: NaturalLanguageSearchService,
+) -> None:
+    """A shape validation still rejects must degrade, not 500 the request."""
+    nl_service.llm_client.chat_completion = AsyncMock(
+        return_value={"intent": "movies", "durationMax": "not-a-number"}
+    )
+
+    parsed = await nl_service._parse_prompt(NaturalLanguageQuery(prompt="short movies"))
+
+    assert parsed.intent == "movies"
+
+
 async def test_filter_by_duration(
     sample_movie: Movie,
     sample_movie_long: Movie,
