@@ -434,7 +434,8 @@ class NaturalLanguageSearchService:
             "JSON schema:\n"
             "{\n"
             '  "intent": "movies|shows|cinemas|unknown",\n'
-            '  "searchQuery": "free-text title or cinema name, or null",\n'
+            '  "searchQuery": "the prompt\'s salient subject (title/name), or null '
+            'only for a genuine open-ended browse",\n'
             + genre_field
             + '  "date": "YYYY-MM-DD, today, tomorrow, or null",\n'
             '  "location": "city name or null",\n'
@@ -454,6 +455,19 @@ class NaturalLanguageSearchService:
             "}\n"
             "\n"
             "Extraction rules:\n"
+            "- searchQuery: copy the prompt's salient subject verbatim — a movie title, "
+            "franchise name, or cinema name — even if it is short, foreign-language, "
+            "accented, or contains unusual punctuation (e.g. 'Chéri, ich komme' or "
+            "'Tuner' are titles, not noise; copy them as-is). If the whole prompt is "
+            "essentially just a name, that name IS the searchQuery — do not leave it "
+            "null because it looks unfamiliar.\n"
+            "- searchQuery is null ONLY for a genuine open-ended browse with no named "
+            "subject, e.g. 'what's playing in Berlin', 'movies tonight', 'horror films'. "
+            "Genre-only or filter-only prompts also leave searchQuery null.\n"
+            "- When genuinely unsure whether a prompt names a subject or not, prefer "
+            "copying it into searchQuery over leaving it null: a wrong guess still "
+            "returns a title-filtered result, while a wrong null silently returns the "
+            "entire unfiltered catalogue.\n"
             "- Always set durationMax for phrases like 'under X minutes', 'below X min', "
             "'shorter than X'.\n"
             "- Always set durationMin for phrases like 'over X minutes', 'above X min', "
