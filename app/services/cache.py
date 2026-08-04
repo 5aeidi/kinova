@@ -139,6 +139,10 @@ class KinoheldCache:
         self._cinemas: list[Cinema] = []
         self._movies: list[Movie] = []
         self._shows: dict[str, list[Show]] = {}  # key: "cinemaId::date"
+        # When each show entry was last fetched. An empty day is indistinguishable
+        # from a genuinely dark venue by content alone, so freshness is what decides
+        # whether an entry may still be served.
+        self._shows_fetched_at: dict[str, dt.datetime] = {}
         self._cities: list[City] = []
         self._genres: list[Genre] = []
         self._last_refresh: dt.datetime | None = None
@@ -259,41 +263,49 @@ class KinoheldCache:
                 selected.append(cinema.id)
         return selected
 
-    async def _prefetch_shows(
-        self,
-        service: KinoheldService,
-        cinemas: list[Cinema],
-    ) -> dict[str, list[Show]]:
-        """Fetch shows for the pre-warm set concurrently, one entry per cinema/date."""
-        cinema_ids = self._cinemas_to_prefetch(cinemas)
-        if not cinema_ids:
-            return {}
-
-        dates = [
+    def _prewarm_window(self) -> list[str]:
+        """Dates the periodic refresh pre-warms: today through the sync horizon."""
+        return [
             (dt.date.today() + dt.timedelta(days=offset)).isoformat()
             for offset in range(settings.kinoheld_sync_show_days)
         ]
-        shows = await self._fetch_shows(service, cinema_ids, dates)
-        logger.info(
-            "Pre-fetched shows for %d cinemas over %d days",
-            len(cinema_ids),
-            len(dates),
-        )
-        return shows
+
+    def _refresh_pairs(self, cinemas: list[Cinema]) -> list[tuple[str, str]]:
+        """Cinema/date pairs the refresh must fetch. Caller must hold the lock.
+
+        The pre-warm window alone is not enough. Kinoheld only publishes about a week
+        ahead, so a request for a later date caches a day that is empty or half-filled
+        at the time, and the window never covers that date again — it stays frozen
+        until it arrives. Re-fetching every future date already in the cache is what
+        keeps those entries honest; the horizon stops on-demand browsing from growing
+        the refresh set without bound.
+        """
+        pairs = [
+            (cinema_id, date)
+            for cinema_id in self._cinemas_to_prefetch(cinemas)
+            for date in self._prewarm_window()
+        ]
+        cutoff = (
+            dt.date.today() + dt.timedelta(days=settings.kinoheld_show_cache_horizon_days)
+        ).isoformat()
+        today = dt.date.today().isoformat()
+        for key in self._shows:
+            cinema_id, _, date = key.partition("::")
+            if today <= date <= cutoff:
+                pairs.append((cinema_id, date))
+        return list(dict.fromkeys(pairs))
 
     async def _fetch_shows(
         self,
         service: KinoheldService,
-        cinema_ids: Iterable[str],
-        dates: Iterable[str],
+        pairs: Iterable[tuple[str, str]],
     ) -> dict[str, list[Show]]:
-        """Fetch every cinema/date combination concurrently.
+        """Fetch every cinema/date pair concurrently.
 
         Serial fetching is the difference between a fast response and a timeout once a
         location resolves to dozens of cinemas.
         """
         semaphore = asyncio.Semaphore(settings.kinoheld_sync_concurrency)
-        dates = list(dates)
         # Shared across the batch so each response's embedded movies collapse onto the
         # copies already seen. Deferring this to the end would hold every duplicate at
         # once, and that peak is what the process never gives back.
@@ -312,10 +324,15 @@ class KinoheldCache:
             _intern_movies([shows], canonical)
             return f"{cinema_id}::{date}", shows
 
-        results = await asyncio.gather(
-            *(fetch(cinema_id, date) for cinema_id in cinema_ids for date in dates),
-        )
+        results = await asyncio.gather(*(fetch(cinema_id, date) for cinema_id, date in pairs))
         return {key: shows for key, shows in results if shows is not None}
+
+    async def _store_shows(self, shows: dict[str, list[Show]]) -> None:
+        """Merge fetched entries in and stamp them fresh. Acquires the lock."""
+        now = dt.datetime.now(tz=dt.timezone.utc)
+        async with self._lock:
+            self._shows.update(shows)
+            self._shows_fetched_at.update(dict.fromkeys(shows, now))
 
     async def refresh(self, service: KinoheldService) -> None:
         """Fetch data from Kinoheld and rebuild the cache atomically."""
@@ -336,7 +353,10 @@ class KinoheldCache:
         cities = await service.search_cities(CitySearchParams(limit=100))
         genres = await service.list_genres()
 
-        shows = await self._prefetch_shows(service, cinemas)
+        async with self._lock:
+            pairs = self._refresh_pairs(cinemas)
+        shows = await self._fetch_shows(service, pairs)
+        logger.info("Refreshed shows for %d cinema/date entries", len(pairs))
 
         async with self._lock:
             self._genres_by_title.update(_titles_with_genres(movies))
@@ -351,9 +371,11 @@ class KinoheldCache:
             # Priority locations were just fetched in full, so they need no backfill.
             self._backfilled_locations = set(priority_locations)
             self._movies = movies
-            # Merge so on-demand entries cached via cache_shows_for_cinema survive
-            # periodic refreshes (which only cover the configured sync cinemas).
+            # Merge rather than replace so an entry whose fetch failed this cycle keeps
+            # its previous value instead of vanishing. Serving it stays bounded because
+            # the read path re-fetches anything older than the TTL.
             self._shows.update(shows)
+            self._shows_fetched_at.update(dict.fromkeys(shows, dt.datetime.now(tz=dt.timezone.utc)))
             self._prune_stale_shows()
             self._cities = cities
             self._genres = genres
@@ -531,16 +553,19 @@ class KinoheldCache:
     ) -> None:
         """Fetch and cache shows for several cinemas at once, concurrently."""
         cinema_ids = list(cinema_ids)
-        if not cinema_ids:
+        dates = list(dates)
+        if not cinema_ids or not dates:
             return
-        fetched = await self._fetch_shows(service, cinema_ids, dates)
+        fetched = await self._fetch_shows(
+            service,
+            [(cinema_id, date) for cinema_id in cinema_ids for date in dates],
+        )
 
         # Enrich the whole batch in one pass. Per-day passes repeat the same titles
         # across cinemas and dates, multiplying the live lookups by the batch size.
         await self._apply_genres(service, [s for day in fetched.values() for s in day])
 
-        async with self._lock:
-            self._shows.update(fetched)
+        await self._store_shows(fetched)
 
     async def has_any_shows(self, cinema_id: str) -> bool:
         """Return True if any shows are cached for ``cinema_id``."""
@@ -552,9 +577,29 @@ class KinoheldCache:
         cinema_id: str,
         dates: Iterable[str],
     ) -> list[str]:
-        """Return the subset of ``dates`` that is not yet cached for ``cinema_id``."""
+        """Return the ``dates`` that need fetching for ``cinema_id``.
+
+        A date counts as needing a fetch when it is absent or older than the TTL. Age
+        rather than emptiness is the test: a genuinely dark venue returns an empty day
+        every time, so re-fetching on empty alone would call upstream forever, while
+        trusting an empty day forever is what leaves a published programme unseen.
+        """
+        cutoff = dt.datetime.now(tz=dt.timezone.utc) - dt.timedelta(
+            seconds=settings.kinoheld_show_cache_ttl_seconds,
+        )
         async with self._lock:
-            return [date_str for date_str in dates if f"{cinema_id}::{date_str}" not in self._shows]
+            return [
+                date_str
+                for date_str in dates
+                if self._needs_fetch(f"{cinema_id}::{date_str}", cutoff)
+            ]
+
+    def _needs_fetch(self, key: str, cutoff: dt.datetime) -> bool:
+        """Whether a cache key is absent or too old to serve. Caller holds the lock."""
+        if key not in self._shows:
+            return True
+        fetched_at = self._shows_fetched_at.get(key)
+        return fetched_at is None or fetched_at < cutoff
 
     # ------------------------------------------------------------------
     # Cities
@@ -726,11 +771,19 @@ class KinoheldCache:
         return [m for m in movies if m.id not in movie_ids_with_future_shows]
 
     def _prune_stale_shows(self) -> None:
-        """Drop cached show entries for past dates. Caller must hold the lock."""
+        """Drop entries for past dates and beyond the horizon. Caller holds the lock.
+
+        Dropping the far future as well as the past keeps the set the refresh has to
+        re-fetch bounded, however far ahead anyone browses.
+        """
         today = dt.date.today().isoformat()
-        stale = [key for key in self._shows if key.split("::", 1)[-1] < today]
+        horizon = (
+            dt.date.today() + dt.timedelta(days=settings.kinoheld_show_cache_horizon_days)
+        ).isoformat()
+        stale = [key for key in self._shows if not today <= key.split("::", 1)[-1] <= horizon]
         for key in stale:
             del self._shows[key]
+            self._shows_fetched_at.pop(key, None)
 
     def snapshot(self) -> dict[str, Any]:
         """Return a debug snapshot of current cache contents."""

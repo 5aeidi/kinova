@@ -365,10 +365,55 @@ class TestOnDemandShows:
         mock_service.search_movies.return_value = []
         mock_service.search_cities.return_value = []
         mock_service.list_genres.return_value = []
+        mock_service.search_shows.return_value = [Show(id="s1", name="Show")]
 
         await cache.refresh(mock_service)
 
         assert f"c9::{future}" in cache._shows
+
+    async def test_refresh_refetches_dates_past_the_prewarm_window(
+        self,
+        cache: KinoheldCache,
+        mock_service: AsyncMock,
+    ):
+        """A far-future entry captured before Kinoheld published must not freeze.
+
+        Kinoheld's programme only reaches ~a week out, so browsing next week caches
+        an empty day. The pre-warm window never covers it again, so without an
+        explicit re-fetch that empty day is served until the date arrives.
+        """
+        far = (
+            dt.date.today() + dt.timedelta(days=settings.kinoheld_sync_show_days + 2)
+        ).isoformat()
+        cache._shows = {f"c9::{far}": []}
+        mock_service.search_cinemas.return_value = []
+        mock_service.search_movies.return_value = []
+        mock_service.search_cities.return_value = []
+        mock_service.list_genres.return_value = []
+        published = Show(id="s1", name="Published since")
+        mock_service.search_shows.return_value = [published]
+
+        await cache.refresh(mock_service)
+
+        assert cache._shows[f"c9::{far}"] == [published]
+
+    async def test_refresh_drops_entries_beyond_the_cache_horizon(
+        self,
+        cache: KinoheldCache,
+        mock_service: AsyncMock,
+    ):
+        beyond = (
+            dt.date.today() + dt.timedelta(days=settings.kinoheld_show_cache_horizon_days + 1)
+        ).isoformat()
+        cache._shows = {f"c9::{beyond}": []}
+        mock_service.search_cinemas.return_value = []
+        mock_service.search_movies.return_value = []
+        mock_service.search_cities.return_value = []
+        mock_service.list_genres.return_value = []
+
+        await cache.refresh(mock_service)
+
+        assert f"c9::{beyond}" not in cache._shows
 
     async def test_refresh_prunes_past_show_dates(
         self,
@@ -385,6 +430,36 @@ class TestOnDemandShows:
         await cache.refresh(mock_service)
 
         assert cache._shows == {}
+
+    async def test_stale_cached_date_is_refetched_on_read(
+        self,
+        cache: KinoheldCache,
+        mock_service: AsyncMock,
+    ):
+        """A cached day older than the TTL must be re-fetched, empty or not.
+
+        An empty day cannot be treated as a miss on its own — dark venues are
+        legitimately empty — so freshness is what distinguishes the two.
+        """
+        date = (dt.date.today() + dt.timedelta(days=1)).isoformat()
+        cache._shows = {f"c1::{date}": []}
+        cache._shows_fetched_at = {
+            f"c1::{date}": dt.datetime.now(tz=dt.timezone.utc)
+            - dt.timedelta(seconds=settings.kinoheld_show_cache_ttl_seconds + 60),
+        }
+
+        assert await cache.get_missing_show_dates("c1", [date]) == [date]
+
+    async def test_fresh_empty_cached_date_is_not_refetched(
+        self,
+        cache: KinoheldCache,
+        mock_service: AsyncMock,
+    ):
+        date = (dt.date.today() + dt.timedelta(days=1)).isoformat()
+        await cache.cache_shows_for_cinema(mock_service, "c1", [date])
+        mock_service.search_shows.return_value = []
+
+        assert await cache.get_missing_show_dates("c1", [date]) == []
 
     async def test_cache_shows_for_cinema_survives_a_failing_date(
         self,

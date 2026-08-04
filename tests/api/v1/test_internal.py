@@ -318,6 +318,11 @@ class TestInternalShows:
         cache._shows = {
             f"123::{today.isoformat()}": [Show(id="s1", name="Cached Show")],
         }
+        # Freshly fetched, so today is served from the cache and only tomorrow is
+        # fetched. Without a stamp the entry reads as stale and is re-fetched.
+        cache._shows_fetched_at = {
+            f"123::{today.isoformat()}": dt.datetime.now(tz=dt.timezone.utc),
+        }
 
         mock_graphql_client.execute.return_value = {
             "shows": [

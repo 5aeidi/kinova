@@ -411,6 +411,10 @@ async def test_structured_search_shows_with_location_uses_cache_filter(
     empty_cache._shows = {
         f"c1::{dt.date.today().isoformat()}": [sample_show],
     }
+    # Stamped fresh so the cached day is served rather than re-fetched.
+    empty_cache._shows_fetched_at = {
+        f"c1::{dt.date.today().isoformat()}": dt.datetime.now(tz=dt.timezone.utc),
+    }
 
     mock_live_service.search_shows = AsyncMock(return_value=[])
 

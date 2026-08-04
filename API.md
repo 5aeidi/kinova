@@ -1120,6 +1120,14 @@ Do not rely only on `code` or `category` — new cinemas may introduce flag name
 - `GET /shows` — cache per cinema/date; refresh when the user changes date or cinema.
 - `GET /movies/{id}` — cache indefinitely; invalidate only if the movie data looks stale.
 
+Server-side, `/internal/shows` entries are kept per cinema/date and re-fetched when they
+age past `KINOHELD_SHOW_CACHE_TTL_SECONDS` (default 30 min), so a day cached before the
+cinema published its programme is corrected rather than served until the date arrives.
+The periodic refresh re-fetches every cached future date within
+`KINOHELD_SHOW_CACHE_HORIZON_DAYS` (default 21), not only its own pre-warm window.
+An empty day is a valid answer — some venues are genuinely dark — so treat `[]` as
+"no shows", not as a cache miss.
+
 ---
 
 ## Generating TypeScript types

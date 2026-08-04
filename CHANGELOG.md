@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Fixed
+
+- `/internal/shows` served stale or empty programmes for a subset of cinemas. Kinoheld only publishes about a week ahead, so a request for a later date cached a day that was empty or half-filled at the time; the pre-warm window never covered that date again, and a present-but-empty entry was treated as cached, so the frozen day was served until it arrived. Cached days now carry a fetch timestamp and are re-fetched once they age past `KINOHELD_SHOW_CACHE_TTL_SECONDS` (default 1800), and the periodic refresh re-fetches every cached future date within `KINOHELD_SHOW_CACHE_HORIZON_DAYS` (default 21) rather than only its own pre-warm window. Emptiness alone is still not treated as a miss, so genuinely dark venues do not trigger repeated upstream calls.
+
 ### Kinoheld cache
 
 #### Changed

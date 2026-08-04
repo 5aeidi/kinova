@@ -219,6 +219,26 @@ class Settings(BaseSettings):
         le=30,
         description="Number of days to fetch shows for during cache refresh",
     )
+    kinoheld_show_cache_ttl_seconds: int = Field(
+        default=1800,
+        ge=60,
+        le=86400,
+        description=(
+            "How long a cached cinema/date entry is served before a read re-fetches it. "
+            "An empty day cannot be treated as a miss — dark venues are legitimately "
+            "empty — so age is what distinguishes stale from genuinely no shows"
+        ),
+    )
+    kinoheld_show_cache_horizon_days: int = Field(
+        default=21,
+        ge=1,
+        le=90,
+        description=(
+            "How far ahead cached show entries are kept and re-fetched. Entries past "
+            "this horizon are dropped so on-demand browsing cannot grow the refresh "
+            "set without bound"
+        ),
+    )
     kinoheld_sync_movie_limit: int = Field(
         default=100,
         ge=1,
