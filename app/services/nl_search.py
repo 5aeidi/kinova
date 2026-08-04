@@ -1,5 +1,6 @@
 """Natural-language search service that translates prompts into Kinoheld queries."""
 
+import contextlib
 import datetime as dt
 import logging
 from dataclasses import dataclass
@@ -909,9 +910,21 @@ class NaturalLanguageSearchService:
             except KinoheldNotFoundError:
                 cinemas = []
         elif parsed.location or parsed.search_query:
-            cinemas = await self._search_cinemas(
-                parsed, live_service, cache, sources, use_cache, limit=20
+            # Only Kinoheld here: this list drives the per-cinema show fetch below and
+            # is capped, so mixing the other sources in would push their venues out of
+            # the cap while their shows still arrived, leaving those unattributable.
+            # They are added back from the shows actually found.
+            params = CinemaSearchParams(
+                search=parsed.search_query,
+                location=parsed.location,
+                limit=20,
             )
+            found = (
+                await cache.search_cinemas(params)
+                if use_cache
+                else await live_service.search_cinemas(params)
+            )
+            cinemas = [kinoheld_cinema_to_unified(item) for item in found]
         else:
             # No location/cinema context: search movies instead and explain via intent.
             movies = await self._search_movies(
@@ -954,12 +967,16 @@ class NaturalLanguageSearchService:
                 cinema_shows = await live_service.search_shows(params)
             shows.extend(kinoheld_show_to_unified(show) for show in cinema_shows)
 
-        shows.extend(await self._extra_source_shows(parsed, sources, date))
+        extra_shows, extra_cinemas = await self._extra_source_shows(parsed, sources, date)
+        shows.extend(extra_shows)
 
         if movie_ids is not None:
             shows = [s for s in shows if s.movie and s.movie.id in movie_ids]
         if parsed.flags:
             shows = self._filter_by_flags(shows, parsed.flags)
+
+        surviving = {show.source for show in shows}
+        cinemas.extend(item for item in extra_cinemas if item.source in surviving)
 
         unique_movies: dict[tuple[str, str], UnifiedMovie] = {}
         for show in shows:
@@ -979,11 +996,17 @@ class NaturalLanguageSearchService:
         parsed: ParsedIntent,
         sources: SourceCaches,
         date: dt.date | None,
-    ) -> list[UnifiedShow]:
-        """Cinetixx and Yorck shows for the requested date, scoped to the location."""
+    ) -> tuple[list[UnifiedShow], list[UnifiedCinema]]:
+        """Cinetixx and Yorck shows for the date, plus the venues they screen at.
+
+        A ``Show`` carries no reference back to its cinema, so the venues are what
+        let a client attribute these screenings; they are resolved here from the
+        shows that actually survived filtering.
+        """
         days = settings.kinoheld_sync_show_days if date is None else None
         start = date or dt.date.today()
         shows: list[UnifiedShow] = []
+        cinema_ids: dict[str, set[str]] = {"cinetixx": set(), "yorck": set()}
 
         def in_location(city: str | None, cinema_name: str | None) -> bool:
             if not parsed.location:
@@ -991,26 +1014,33 @@ class NaturalLanguageSearchService:
             return _contains(city, parsed.location) or _contains(cinema_name, parsed.location)
 
         if sources.cinetixx is not None:
-            cinetixx = await sources.cinetixx.search_shows(
+            for show in await sources.cinetixx.search_shows(
                 CinetixxShowSearchParams(date=start, days=days, limit=1000),
-            )
-            shows.extend(
-                cinetixx_show_to_unified(show)
-                for show in cinetixx
-                if in_location(show.city, show.cinema_name)
-            )
+            ):
+                if in_location(show.city, show.cinema_name):
+                    shows.append(cinetixx_show_to_unified(show))
+                    if show.cinema_id:
+                        cinema_ids["cinetixx"].add(show.cinema_id)
 
         if sources.yorck is not None:
-            yorck = await sources.yorck.search_shows(
+            for show in await sources.yorck.search_shows(
                 YorckShowSearchParams(date=start, days=days, limit=1000),
-            )
-            shows.extend(
-                yorck_show_to_unified(show)
-                for show in yorck
-                if in_location(show.city, show.cinema_name)
-            )
+            ):
+                if in_location(show.city, show.cinema_name):
+                    shows.append(yorck_show_to_unified(show))
+                    if show.cinema_id:
+                        cinema_ids["yorck"].add(show.cinema_id)
 
-        return shows
+        cinemas: list[UnifiedCinema] = []
+        for cinema_id in sorted(cinema_ids["cinetixx"]):
+            with contextlib.suppress(Exception):
+                cinemas.append(
+                    cinetixx_cinema_to_unified(await sources.cinetixx.get_cinema(cinema_id)),
+                )
+        for cinema_id in sorted(cinema_ids["yorck"]):
+            with contextlib.suppress(Exception):
+                cinemas.append(yorck_cinema_to_unified(await sources.yorck.get_cinema(cinema_id)))
+        return shows, cinemas
 
     # ------------------------------------------------------------------
     # Helpers

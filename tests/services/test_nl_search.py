@@ -727,3 +727,25 @@ async def test_fallback_title_search_matches_when_upstream_returns_nothing(
 
     assert [m.title for m in result.movies] == ["A Nightmare on Elm Street"]
     assert calls == ["Nightmare", None]
+
+
+async def test_show_search_reports_the_yorck_venues_its_shows_come_from(
+    nl_service: NaturalLanguageSearchService,
+    mock_live_service: AsyncMock,
+    empty_cache: KinoheldCache,
+    yorck_cache_with_odyssey: YorckCache,
+) -> None:
+    """A Show carries no cinema reference, so its venue must reach the client."""
+    mock_live_service.search_cinemas = AsyncMock(return_value=[])
+    mock_live_service.search_movies = AsyncMock(return_value=[])
+
+    result = await nl_service.structured_search(
+        StructuredSearchQuery(intent="shows", location="Berlin", limit=100),
+        mock_live_service,
+        empty_cache,
+        SourceCaches(yorck=yorck_cache_with_odyssey),
+    )
+
+    assert [s.source for s in result.shows] == ["yorck"]
+    assert [c.name for c in result.cinemas] == ["Babylon Kreuzberg"]
+    assert result.cinemas[0].source == "yorck"
