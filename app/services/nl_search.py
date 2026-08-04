@@ -81,7 +81,7 @@ class NaturalLanguageQuery(BaseModel):
         default=None,
         description="Optional city/location hint (overrides prompt inference)",
     )
-    limit: int = Field(default=20, ge=1, le=100)
+    limit: int = Field(default=20, ge=1, le=300)
 
 
 def _normalise_relative_date(value: str | None) -> str | None:
@@ -270,7 +270,7 @@ class StructuredSearchQuery(BaseModel):
         alias="useCache",
         description="Use cached data instead of live Kinoheld requests",
     )
-    limit: int = Field(default=20, ge=1, le=100)
+    limit: int = Field(default=20, ge=1, le=300)
 
     @field_validator("date")
     @classmethod
