@@ -2,19 +2,67 @@
 
 import datetime as dt
 import logging
+from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.config import settings
 from app.core.exceptions import KinoheldNotFoundError
 from app.schemas.cinema import Cinema, CinemaSearchParams
+from app.schemas.cinetixx import (
+    CinetixxCinemaSearchParams,
+    CinetixxMovieSearchParams,
+    CinetixxShowSearchParams,
+)
 from app.schemas.movie import Movie, MovieSearchParams
-from app.schemas.show import Show, ShowSearchParams
+from app.schemas.show import ShowSearchParams
+from app.schemas.unified import UnifiedCinema, UnifiedMovie, UnifiedShow
+from app.schemas.yorck import (
+    YorckCinemaSearchParams,
+    YorckMovieSearchParams,
+    YorckShowSearchParams,
+)
 from app.services.cache import KinoheldCache
+from app.services.cinetixx_cache import CinetixxCache
 from app.services.kinoheld import KinoheldService
 from app.services.llm_client import LLMClient, LLMError
+from app.services.unified import (
+    cinetixx_cinema_to_unified,
+    cinetixx_movie_to_unified,
+    cinetixx_show_to_unified,
+    kinoheld_cinema_to_unified,
+    kinoheld_movie_to_unified,
+    kinoheld_show_to_unified,
+    yorck_cinema_to_unified,
+    yorck_movie_to_unified,
+    yorck_show_to_unified,
+)
+from app.services.yorck_cache import YorckCache
 
 logger = logging.getLogger(__name__)
+
+
+def _contains(value: str | None, query: str | None) -> bool:
+    """Case-insensitive substring match; a missing query matches everything."""
+    if not query:
+        return True
+    if not value:
+        return False
+    return query.casefold() in value.casefold()
+
+
+@dataclass
+class SourceCaches:
+    """Non-Kinoheld sources a search may draw on.
+
+    These are read from their periodic caches rather than fetched live: a live
+    Cinetixx or Yorck read means pulling a whole provider programme, which would
+    add tens of seconds to a search request. ``useCache`` therefore governs the
+    Kinoheld path only.
+    """
+
+    cinetixx: CinetixxCache | None = None
+    yorck: YorckCache | None = None
 
 
 class NaturalLanguageQuery(BaseModel):
@@ -235,9 +283,9 @@ class SearchResult(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     intent: str
-    cinemas: list[Cinema] = Field(default_factory=list)
-    movies: list[Movie] = Field(default_factory=list)
-    shows: list[Show] = Field(default_factory=list)
+    cinemas: list[UnifiedCinema] = Field(default_factory=list)
+    movies: list[UnifiedMovie] = Field(default_factory=list)
+    shows: list[UnifiedShow] = Field(default_factory=list)
     total_results: int = Field(default=0, alias="totalResults")
 
 
@@ -262,6 +310,7 @@ class NaturalLanguageSearchService:
         request: NaturalLanguageQuery,
         live_service: KinoheldService,
         cache: KinoheldCache,
+        sources: SourceCaches | None = None,
     ) -> NaturalLanguageResult:
         """Run the full NL search pipeline."""
         parsed = await self._parse_prompt(request, await self._genre_vocabulary(cache))
@@ -273,6 +322,7 @@ class NaturalLanguageSearchService:
             parsed,
             live_service,
             cache,
+            sources or SourceCaches(),
             request.use_cache,
             request.limit,
         )
@@ -293,6 +343,7 @@ class NaturalLanguageSearchService:
         request: StructuredSearchQuery,
         live_service: KinoheldService,
         cache: KinoheldCache,
+        sources: SourceCaches | None = None,
     ) -> SearchResult:
         """Run a deterministic search using explicit UI filters."""
         parsed = self._structured_to_parsed(request)
@@ -301,6 +352,7 @@ class NaturalLanguageSearchService:
             parsed,
             live_service,
             cache,
+            sources or SourceCaches(),
             request.use_cache,
             request.limit,
         )
@@ -416,8 +468,7 @@ class NaturalLanguageSearchService:
             '- If the prompt asks for showtimes/screenings, intent is "shows"; '
             'if it asks for cinemas/theatres, intent is "cinemas"; '
             'otherwise default to "movies".\n'
-            "- Return only the JSON object, no markdown or explanation.\n"
-            + genre_rules
+            "- Return only the JSON object, no markdown or explanation.\n" + genre_rules
         )
         try:
             data = await self.llm_client.chat_completion(
@@ -491,26 +542,64 @@ class NaturalLanguageSearchService:
     # ------------------------------------------------------------------
     # Execution
     # ------------------------------------------------------------------
+    @staticmethod
+    def _has_any_filter(parsed: ParsedIntent) -> bool:
+        """Whether the parser extracted anything to actually search on.
+
+        ``location`` is excluded deliberately: it is usually supplied by the caller
+        rather than extracted from the prompt, so it says nothing about whether the
+        prompt itself was understood.
+        """
+        return any(
+            (
+                parsed.search_query,
+                parsed.genres,
+                parsed.date,
+                parsed.cinema_id,
+                parsed.flags,
+                parsed.language,
+                parsed.duration_min is not None,
+                parsed.duration_max is not None,
+                parsed.year is not None,
+                parsed.year_min is not None,
+                parsed.year_max is not None,
+                parsed.rating_min is not None,
+                parsed.rating_max is not None,
+                parsed.actors,
+                parsed.directors,
+                parsed.cast,
+            ),
+        )
+
     async def _execute_intent(
         self,
         parsed: ParsedIntent,
         live_service: KinoheldService,
         cache: KinoheldCache,
+        sources: SourceCaches,
         use_cache: bool,
         limit: int,
-    ) -> tuple[list[Cinema], list[Movie], list[Show]]:
+    ) -> tuple[list[UnifiedCinema], list[UnifiedMovie], list[UnifiedShow]]:
+        # An unparseable prompt yields no intent and no filters. Falling through to
+        # the movie branch would run an unfiltered browse and return the whole
+        # catalogue, which reads as a confident answer rather than a failure. A
+        # genuine browse ("what's playing in Berlin") parses as intent=movies, so it
+        # is unaffected.
+        if parsed.intent == "unknown" and not self._has_any_filter(parsed):
+            logger.info("Prompt yielded no intent and no filters; returning no results")
+            return [], [], []
+
         if parsed.intent == "cinemas":
-            cinemas = await self._search_cinemas(parsed, live_service, cache, use_cache, limit)
+            cinemas = await self._search_cinemas(
+                parsed, live_service, cache, sources, use_cache, limit
+            )
             return cinemas, [], []
 
         if parsed.intent == "shows":
-            cinemas, movies, shows = await self._search_shows(
-                parsed, live_service, cache, use_cache, limit
-            )
-            return cinemas, movies, shows
+            return await self._search_shows(parsed, live_service, cache, sources, use_cache, limit)
 
         # Default: movies
-        movies = await self._search_movies(parsed, live_service, cache, use_cache, limit)
+        movies = await self._search_movies(parsed, live_service, cache, sources, use_cache, limit)
         return [], movies, []
 
     async def _search_cinemas(
@@ -518,47 +607,152 @@ class NaturalLanguageSearchService:
         parsed: ParsedIntent,
         live_service: KinoheldService,
         cache: KinoheldCache,
+        sources: SourceCaches,
         use_cache: bool,
         limit: int,
-    ) -> list[Cinema]:
+    ) -> list[UnifiedCinema]:
         params = CinemaSearchParams(
             search=parsed.search_query,
             location=parsed.location,
             limit=limit,
         )
         if use_cache:
-            return await cache.search_cinemas(params)
-        return await live_service.search_cinemas(params)
+            kinoheld = await cache.search_cinemas(params)
+        else:
+            kinoheld = await live_service.search_cinemas(params)
+        results = [kinoheld_cinema_to_unified(item) for item in kinoheld]
+
+        # Cinetixx and Yorck cinemas both carry city/district text, so the location
+        # doubles as the search term when no explicit title was given.
+        term = parsed.search_query or parsed.location
+        if sources.cinetixx is not None:
+            cinetixx = await sources.cinetixx.search_cinemas(
+                CinetixxCinemaSearchParams(search=term, limit=limit),
+            )
+            results.extend(cinetixx_cinema_to_unified(item) for item in cinetixx)
+        if sources.yorck is not None:
+            yorck = await sources.yorck.search_cinemas(
+                YorckCinemaSearchParams(search=term, limit=limit),
+            )
+            results.extend(yorck_cinema_to_unified(item) for item in yorck)
+
+        return results[:limit]
 
     async def _search_movies(
         self,
         parsed: ParsedIntent,
         live_service: KinoheldService,
         cache: KinoheldCache,
+        sources: SourceCaches,
         use_cache: bool,
         limit: int,
-    ) -> list[Movie]:
+    ) -> list[UnifiedMovie]:
         # Fetch a generous candidate set so post-filters have enough data.
         candidate_limit = max(limit, 100)
-        params = MovieSearchParams(
+        movies = await self._kinoheld_movies(
+            parsed,
+            live_service,
+            cache,
+            use_cache,
+            candidate_limit,
             search=parsed.search_query,
-            location=parsed.location,
-            limit=candidate_limit,
         )
-        if use_cache:
-            movies = await cache.search_movies(params)
-        else:
-            movies = await live_service.search_movies(params)
+        movies.extend(await self._extra_source_movies(parsed, sources, candidate_limit))
 
         # Apply deterministic post-filters.
         movies = self._apply_movie_filters(movies, parsed)
 
         if parsed.search_query and settings.llm_fallback_search_enabled and not movies:
+            # Upstream's own matching is stricter than a substring match, so retry
+            # against a broad unfiltered slice locally. Previously this passed an
+            # always-empty list and so could never return anything.
             logger.info("No movies found by upstream search; trying fallback title search")
-            movies = self._fallback_text_search(movies if use_cache else [], parsed.search_query)
-            movies = self._apply_movie_filters(movies, parsed)
+            candidates = await self._kinoheld_movies(
+                parsed,
+                live_service,
+                cache,
+                use_cache,
+                candidate_limit,
+                search=None,
+            )
+            candidates.extend(await self._extra_source_movies(parsed, sources, candidate_limit, ""))
+            movies = self._apply_movie_filters(
+                self._fallback_text_search(candidates, parsed.search_query),
+                parsed,
+            )
 
         return movies[:limit]
+
+    @staticmethod
+    async def _kinoheld_movies(
+        parsed: ParsedIntent,
+        live_service: KinoheldService,
+        cache: KinoheldCache,
+        use_cache: bool,
+        limit: int,
+        search: str | None,
+    ) -> list[UnifiedMovie]:
+        params = MovieSearchParams(search=search, location=parsed.location, limit=limit)
+        movies = (
+            await cache.search_movies(params)
+            if use_cache
+            else await live_service.search_movies(params)
+        )
+        return [kinoheld_movie_to_unified(movie) for movie in movies]
+
+    async def _extra_source_movies(
+        self,
+        parsed: ParsedIntent,
+        sources: SourceCaches,
+        limit: int,
+        search_override: str | None = None,
+    ) -> list[UnifiedMovie]:
+        """Cinetixx and Yorck movies, scoped to the requested location.
+
+        Neither provider's movie search takes a location, and both span more than
+        one city, so the location is applied by way of their cached shows: a movie
+        qualifies when it screens at a venue in the requested place.
+        """
+        search = parsed.search_query if search_override is None else search_override
+        results: list[UnifiedMovie] = []
+
+        if sources.cinetixx is not None:
+            movies = await sources.cinetixx.search_movies(
+                CinetixxMovieSearchParams(search=search or None, limit=1000),
+            )
+            if parsed.location:
+                dataset = await sources.cinetixx.get_dataset()
+                playing = {
+                    identifier
+                    for show in dataset.shows
+                    if _contains(show.city, parsed.location)
+                    or _contains(show.cinema_name, parsed.location)
+                    for identifier in (show.movie_id, show.event_id)
+                    if identifier
+                }
+                movies = [
+                    movie
+                    for movie in movies
+                    if playing & {movie.id, movie.movie_id, movie.event_id}
+                ]
+            results.extend(cinetixx_movie_to_unified(movie) for movie in movies[:limit])
+
+        if sources.yorck is not None:
+            movies = await sources.yorck.search_movies(
+                YorckMovieSearchParams(search=search or None, limit=1000),
+            )
+            if parsed.location:
+                dataset = await sources.yorck.get_dataset()
+                if not any(
+                    _contains(cinema.city, parsed.location)
+                    or _contains(cinema.district, parsed.location)
+                    or _contains(cinema.name, parsed.location)
+                    for cinema in dataset.cinemas
+                ):
+                    movies = []
+            results.extend(yorck_movie_to_unified(movie) for movie in movies[:limit])
+
+        return results
 
     def _apply_movie_filters(
         self,
@@ -699,70 +893,124 @@ class NaturalLanguageSearchService:
         parsed: ParsedIntent,
         live_service: KinoheldService,
         cache: KinoheldCache,
+        sources: SourceCaches,
         use_cache: bool,
         limit: int,
-    ) -> tuple[list[Cinema], list[Movie], list[Show]]:
+    ) -> tuple[list[UnifiedCinema], list[UnifiedMovie], list[UnifiedShow]]:
         # Determine target cinemas.
-        cinemas: list[Cinema] = []
+        cinemas: list[UnifiedCinema] = []
         if parsed.cinema_id:
             try:
-                cinemas = [await self._get_cinema(parsed.cinema_id, live_service, cache, use_cache)]
+                cinemas = [
+                    kinoheld_cinema_to_unified(
+                        await self._get_cinema(parsed.cinema_id, live_service, cache, use_cache),
+                    ),
+                ]
             except KinoheldNotFoundError:
                 cinemas = []
-        elif parsed.location:
-            cinemas = await self._search_cinemas(parsed, live_service, cache, use_cache, limit=20)
-        elif parsed.search_query:
-            cinemas = await self._search_cinemas(parsed, live_service, cache, use_cache, limit=20)
+        elif parsed.location or parsed.search_query:
+            cinemas = await self._search_cinemas(
+                parsed, live_service, cache, sources, use_cache, limit=20
+            )
         else:
             # No location/cinema context: search movies instead and explain via intent.
-            movies = await self._search_movies(parsed, live_service, cache, use_cache, limit)
+            movies = await self._search_movies(
+                parsed, live_service, cache, sources, use_cache, limit
+            )
             return [], movies, []
 
         # Determine target movies when a title/genre/actor/director is specified.
         movie_ids: set[str] | None = None
         if parsed.search_query or parsed.genres or parsed.actors or parsed.directors or parsed.cast:
-            movie_params = MovieSearchParams(
-                search=parsed.search_query,
-                location=parsed.location,
-                limit=100,
+            candidate_movies = await self._kinoheld_movies(
+                parsed, live_service, cache, use_cache, 100, search=parsed.search_query
             )
-            if use_cache:
-                candidate_movies = await cache.search_movies(movie_params)
-            else:
-                candidate_movies = await live_service.search_movies(movie_params)
-            candidate_movies = self._apply_movie_filters(candidate_movies, parsed)
-            movie_ids = {m.id for m in candidate_movies}
+            candidate_movies.extend(await self._extra_source_movies(parsed, sources, 1000))
+            movie_ids = {m.id for m in self._apply_movie_filters(candidate_movies, parsed)}
 
-        shows: list[Show] = []
-        for cinema in cinemas:
-            date = self._safe_date(parsed.date)
+        date = self._safe_date(parsed.date)
+        shows: list[UnifiedShow] = []
+        for cinema in (item for item in cinemas if item.source == "kinoheld"):
             params = ShowSearchParams(
-                cinema_id=cinema.id,
+                cinema_id=cinema.source_id,
                 date=date,
                 days=settings.kinoheld_sync_show_days if date is None else None,
                 movie_id=None,
             )
             if use_cache:
                 cinema_shows = await cache.search_shows(params)
-                date_range = self._date_range(date)
-                missing_dates = await cache.get_missing_show_dates(cinema.id, date_range)
+                missing_dates = await cache.get_missing_show_dates(
+                    cinema.source_id,
+                    self._date_range(date),
+                )
                 if missing_dates:
-                    await cache.cache_shows_for_cinema(live_service, cinema.id, missing_dates)
+                    await cache.cache_shows_for_cinema(
+                        live_service,
+                        cinema.source_id,
+                        missing_dates,
+                    )
                     cinema_shows = await cache.search_shows(params)
             else:
                 cinema_shows = await live_service.search_shows(params)
+            shows.extend(kinoheld_show_to_unified(show) for show in cinema_shows)
 
-            if movie_ids is not None:
-                cinema_shows = [s for s in cinema_shows if s.movie and s.movie.id in movie_ids]
-            if parsed.flags:
-                cinema_shows = self._filter_by_flags(cinema_shows, parsed.flags)
-            shows.extend(cinema_shows)
+        shows.extend(await self._extra_source_shows(parsed, sources, date))
 
-        unique_movies: dict[str, Movie] = {}
+        if movie_ids is not None:
+            shows = [s for s in shows if s.movie and s.movie.id in movie_ids]
+        if parsed.flags:
+            shows = self._filter_by_flags(shows, parsed.flags)
+
+        unique_movies: dict[tuple[str, str], UnifiedMovie] = {}
         for show in shows:
-            if show.movie and show.movie.id not in unique_movies:
-                unique_movies[show.movie.id] = show.movie
+            if show.movie is None:
+                continue
+            key = (show.source, show.movie.id)
+            if key not in unique_movies:
+                unique_movies[key] = UnifiedMovie(
+                    **show.movie.model_dump(by_alias=True),
+                    source=show.source,
+                    sourceId=show.movie.id,
+                )
         return cinemas, list(unique_movies.values()), shows[:limit]
+
+    async def _extra_source_shows(
+        self,
+        parsed: ParsedIntent,
+        sources: SourceCaches,
+        date: dt.date | None,
+    ) -> list[UnifiedShow]:
+        """Cinetixx and Yorck shows for the requested date, scoped to the location."""
+        days = settings.kinoheld_sync_show_days if date is None else None
+        start = date or dt.date.today()
+        shows: list[UnifiedShow] = []
+
+        def in_location(city: str | None, cinema_name: str | None) -> bool:
+            if not parsed.location:
+                return True
+            return _contains(city, parsed.location) or _contains(cinema_name, parsed.location)
+
+        if sources.cinetixx is not None:
+            cinetixx = await sources.cinetixx.search_shows(
+                CinetixxShowSearchParams(date=start, days=days, limit=1000),
+            )
+            shows.extend(
+                cinetixx_show_to_unified(show)
+                for show in cinetixx
+                if in_location(show.city, show.cinema_name)
+            )
+
+        if sources.yorck is not None:
+            yorck = await sources.yorck.search_shows(
+                YorckShowSearchParams(date=start, days=days, limit=1000),
+            )
+            shows.extend(
+                yorck_show_to_unified(show)
+                for show in yorck
+                if in_location(show.city, show.cinema_name)
+            )
+
+        return shows
 
     # ------------------------------------------------------------------
     # Helpers
@@ -802,7 +1050,7 @@ class NaturalLanguageSearchService:
         return [movie for movie in movies if matches(movie)]
 
     @staticmethod
-    def _filter_by_flags(shows: list[Show], flags: list[str]) -> list[Show]:
+    def _filter_by_flags(shows: list[UnifiedShow], flags: list[str]) -> list[UnifiedShow]:
         wanted = {f.casefold() for f in flags}
         return [
             s
@@ -812,7 +1060,7 @@ class NaturalLanguageSearchService:
         ]
 
     @staticmethod
-    def _fallback_text_search(movies: list[Movie], query: str) -> list[Movie]:
+    def _fallback_text_search(movies: list[UnifiedMovie], query: str) -> list[UnifiedMovie]:
         q = query.casefold()
         return [m for m in movies if q in m.title.casefold()]
 

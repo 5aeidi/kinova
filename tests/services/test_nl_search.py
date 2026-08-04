@@ -8,14 +8,17 @@ import pytest
 from app.schemas.cinema import Cinema, CitySummary
 from app.schemas.movie import Genre, Movie, Person
 from app.schemas.show import Show, ShowFlag
+from app.schemas.yorck import YorckCinema, YorckDataset, YorckMovie, YorckShow
 from app.services.cache import KinoheldCache
 from app.services.llm_client import LLMClient, LLMError
 from app.services.nl_search import (
     NaturalLanguageQuery,
     NaturalLanguageSearchService,
     ParsedIntent,
+    SourceCaches,
     StructuredSearchQuery,
 )
+from app.services.yorck_cache import YorckCache
 
 
 @pytest.fixture
@@ -540,3 +543,187 @@ class TestGenreMatching:
         movies = [_movie("1", "Horror")]
 
         assert NaturalLanguageSearchService._filter_by_genres(movies, []) == movies
+
+
+# ----------------------------------------------------------------------
+# Multi-source search, unknown-intent guard, and fallback title search
+# ----------------------------------------------------------------------
+@pytest.fixture
+def yorck_cache_with_odyssey() -> YorckCache:
+    """A Yorck cache holding the English-titled film Kinoheld lists in German."""
+    cache = YorckCache()
+    cache._dataset = YorckDataset(
+        cinemas=[
+            YorckCinema(
+                id="babylon-kreuzberg",
+                slug="babylon-kreuzberg",
+                name="Babylon Kreuzberg",
+                city="Berlin",
+                district="Kreuzberg",
+            ),
+        ],
+        movies=[
+            YorckMovie(id="HO1", slug="the-odyssey", title="The Odyssey", runtime=172),
+        ],
+        shows=[
+            YorckShow(
+                id="1002-1",
+                movieId="HO1",
+                movieTitle="The Odyssey",
+                cinemaId="babylon-kreuzberg",
+                cinemaName="Babylon Kreuzberg",
+                city="Berlin",
+                beginsAt=dt.datetime.now(tz=dt.timezone.utc),
+                date=dt.date.today(),
+            ),
+        ],
+    )
+    cache._last_refresh = dt.datetime.now(tz=dt.timezone.utc)
+    return cache
+
+
+async def test_yorck_movies_appear_in_search_results(
+    nl_service: NaturalLanguageSearchService,
+    mock_live_service: AsyncMock,
+    empty_cache: KinoheldCache,
+    yorck_cache_with_odyssey: YorckCache,
+) -> None:
+    """Kinoheld lists this film under its German title, so only Yorck can match it."""
+    mock_live_service.search_movies = AsyncMock(return_value=[])
+
+    result = await nl_service.structured_search(
+        StructuredSearchQuery(
+            intent="movies", search_query="The Odyssey", location="Berlin", limit=20
+        ),
+        mock_live_service,
+        empty_cache,
+        SourceCaches(yorck=yorck_cache_with_odyssey),
+    )
+
+    assert [m.title for m in result.movies] == ["The Odyssey"]
+    assert result.movies[0].source == "yorck"
+    assert result.movies[0].source_id == "HO1"
+
+
+async def test_yorck_cinemas_appear_in_cinema_search(
+    nl_service: NaturalLanguageSearchService,
+    mock_live_service: AsyncMock,
+    empty_cache: KinoheldCache,
+    yorck_cache_with_odyssey: YorckCache,
+) -> None:
+    mock_live_service.search_cinemas = AsyncMock(return_value=[])
+
+    result = await nl_service.structured_search(
+        StructuredSearchQuery(intent="cinemas", location="Berlin", limit=20),
+        mock_live_service,
+        empty_cache,
+        SourceCaches(yorck=yorck_cache_with_odyssey),
+    )
+
+    assert [c.name for c in result.cinemas] == ["Babylon Kreuzberg"]
+    assert result.cinemas[0].source == "yorck"
+
+
+async def test_yorck_excluded_for_a_location_it_does_not_serve(
+    nl_service: NaturalLanguageSearchService,
+    mock_live_service: AsyncMock,
+    empty_cache: KinoheldCache,
+    yorck_cache_with_odyssey: YorckCache,
+) -> None:
+    """Yorck is Berlin-only; a Munich query must not pull its catalogue in."""
+    mock_live_service.search_movies = AsyncMock(return_value=[])
+
+    result = await nl_service.structured_search(
+        StructuredSearchQuery(
+            intent="movies", search_query="The Odyssey", location="Munich", limit=20
+        ),
+        mock_live_service,
+        empty_cache,
+        SourceCaches(yorck=yorck_cache_with_odyssey),
+    )
+
+    assert result.movies == []
+
+
+async def test_unparseable_prompt_returns_no_results(
+    nl_service: NaturalLanguageSearchService,
+    mock_live_service: AsyncMock,
+    empty_cache: KinoheldCache,
+    sample_movie: Movie,
+) -> None:
+    """An unparsed prompt must not fall through to an unfiltered catalogue browse."""
+    mock_live_service.search_movies = AsyncMock(return_value=[sample_movie])
+
+    result = await nl_service.structured_search(
+        StructuredSearchQuery(intent="unknown", search_query=None, location="Berlin", limit=100),
+        mock_live_service,
+        empty_cache,
+    )
+
+    assert result.movies == []
+    assert result.total_results == 0
+    mock_live_service.search_movies.assert_not_called()
+
+
+async def test_unknown_intent_with_a_search_term_still_searches(
+    nl_service: NaturalLanguageSearchService,
+    mock_live_service: AsyncMock,
+    empty_cache: KinoheldCache,
+    sample_movie: Movie,
+) -> None:
+    """The guard keys on having no filters at all, not on the intent alone."""
+    mock_live_service.search_movies = AsyncMock(return_value=[sample_movie])
+
+    result = await nl_service.structured_search(
+        StructuredSearchQuery(intent="unknown", search_query="Nightmare", limit=20),
+        mock_live_service,
+        empty_cache,
+    )
+
+    assert [m.title for m in result.movies] == ["A Nightmare on Elm Street"]
+
+
+async def test_browse_intent_still_returns_the_catalogue(
+    nl_service: NaturalLanguageSearchService,
+    mock_live_service: AsyncMock,
+    empty_cache: KinoheldCache,
+    sample_movie: Movie,
+) -> None:
+    """ "What's playing in Berlin" parses as movies and must keep working."""
+    mock_live_service.search_movies = AsyncMock(return_value=[sample_movie])
+
+    result = await nl_service.structured_search(
+        StructuredSearchQuery(intent="movies", search_query=None, location="Berlin", limit=100),
+        mock_live_service,
+        empty_cache,
+    )
+
+    assert [m.title for m in result.movies] == ["A Nightmare on Elm Street"]
+
+
+async def test_fallback_title_search_matches_when_upstream_returns_nothing(
+    nl_service: NaturalLanguageSearchService,
+    mock_live_service: AsyncMock,
+    empty_cache: KinoheldCache,
+    sample_movie: Movie,
+) -> None:
+    """Upstream misses the partial title; the local fallback must still find it.
+
+    The fallback previously searched an always-empty list and could never match.
+    """
+    calls: list[str | None] = []
+
+    async def search_movies(params):
+        calls.append(params.search)
+        return [] if params.search else [sample_movie]
+
+    mock_live_service.search_movies = AsyncMock(side_effect=search_movies)
+
+    result = await nl_service.structured_search(
+        StructuredSearchQuery(intent="movies", search_query="Nightmare", limit=20),
+        mock_live_service,
+        empty_cache,
+    )
+
+    assert [m.title for m in result.movies] == ["A Nightmare on Elm Street"]
+    assert calls == ["Nightmare", None]
